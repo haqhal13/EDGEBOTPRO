@@ -1,5 +1,6 @@
 import chalk from 'chalk';
 import { ENV } from '../config/env';
+import fetchData from '../utils/fetchData';
 
 interface MarketStats {
     marketKey: string; // e.g., "BTC-15min"
@@ -15,6 +16,11 @@ interface MarketStats {
     lastUpdate: number;
     endDate?: number; // Market end date timestamp (if available)
     conditionId?: string; // Condition ID for market lookup
+    assetUp?: string; // Asset ID for UP outcome
+    assetDown?: string; // Asset ID for DOWN outcome
+    currentPriceUp?: number; // Current market price for UP
+    currentPriceDown?: number; // Current market price for DOWN
+    lastPriceUpdate?: number; // Timestamp of last price update
 }
 
 class MarketTracker {
@@ -190,6 +196,8 @@ class MarketTracker {
                 lastUpdate: Date.now(),
                 endDate: activity.endDate ? activity.endDate * 1000 : undefined, // Convert to milliseconds
                 conditionId: activity.conditionId,
+                assetUp: isUp ? activity.asset : undefined,
+                assetDown: !isUp ? activity.asset : undefined,
             };
             this.markets.set(marketKey, market);
             
@@ -209,6 +217,13 @@ class MarketTracker {
             }
             if (activity.conditionId && !market.conditionId) {
                 market.conditionId = activity.conditionId;
+            }
+            // Store asset IDs for UP and DOWN outcomes
+            if (isUp && activity.asset && !market.assetUp) {
+                market.assetUp = activity.asset;
+            }
+            if (!isUp && activity.asset && !market.assetDown) {
+                market.assetDown = activity.asset;
             }
         }
 
@@ -234,9 +249,51 @@ class MarketTracker {
     }
 
     /**
+     * Fetch current prices for market assets
+     * Uses positions from tracked traders to get current prices
+     */
+    private async fetchCurrentPrices(market: MarketStats): Promise<void> {
+        const now = Date.now();
+        // Only update prices every 10 seconds to avoid too many API calls
+        if (market.lastPriceUpdate && now - market.lastPriceUpdate < 10000) {
+            return;
+        }
+
+        try {
+            // Fetch prices from positions of tracked traders
+            // This gives us the most accurate current prices
+            for (const traderAddress of ENV.USER_ADDRESSES) {
+                try {
+                    const positions = await fetchData(
+                        `https://data-api.polymarket.com/positions?user=${traderAddress}`
+                    ).catch(() => null);
+
+                    if (Array.isArray(positions)) {
+                        for (const pos of positions) {
+                            // Match by asset ID
+                            if (market.assetUp && pos.asset === market.assetUp && pos.curPrice !== undefined) {
+                                market.currentPriceUp = parseFloat(pos.curPrice);
+                            }
+                            if (market.assetDown && pos.asset === market.assetDown && pos.curPrice !== undefined) {
+                                market.currentPriceDown = parseFloat(pos.curPrice);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Continue to next trader
+                }
+            }
+
+            market.lastPriceUpdate = now;
+        } catch (e) {
+            // Silently fail - prices will be updated on next cycle
+        }
+    }
+
+    /**
      * Display market statistics
      */
-    displayStats(): void {
+    async displayStats(): Promise<void> {
         const now = Date.now();
         const timeSinceLastDisplay = now - this.lastDisplayTime;
         
@@ -284,6 +341,10 @@ class MarketTracker {
             return;
         }
 
+        // Fetch current prices for all active markets (in parallel, but limit concurrency)
+        const pricePromises = activeMarkets.map(m => this.fetchCurrentPrices(m));
+        await Promise.allSettled(pricePromises);
+
         // Stable dashboard: clear screen and redraw
         console.clear();
 
@@ -305,39 +366,80 @@ class MarketTracker {
             const upPercent = totalInvested > 0 ? (market.investedUp / totalInvested) * 100 : 0;
             const downPercent = totalInvested > 0 ? (market.investedDown / totalInvested) * 100 : 0;
 
-        console.log(chalk.yellow.bold(`${market.marketKey}`));
-        console.log(chalk.gray(`  Market: ${market.marketName.substring(0, 60)}`));
-            
             // Calculate average prices
             const avgPriceUp = market.sharesUp > 0 ? market.totalCostUp / market.sharesUp : 0;
             const avgPriceDown = market.sharesDown > 0 ? market.totalCostDown / market.sharesDown : 0;
             
-            // UP stats
-        console.log(chalk.green(`  📈 UP:`));
-        console.log(chalk.green(`     Shares: ${market.sharesUp.toFixed(4)}`));
-        console.log(chalk.green(`     Invested: $${market.investedUp.toFixed(2)}`));
-        console.log(chalk.green(`     Avg Price: $${avgPriceUp.toFixed(4)}`));
-        console.log(chalk.green(`     Trades: ${market.tradesUp}`));
+            // Calculate unrealized PnL
+            let currentValueUp = 0;
+            let currentValueDown = 0;
+            let pnlUp = 0;
+            let pnlDown = 0;
+            let totalPnl = 0;
+
+            if (market.currentPriceUp !== undefined && market.sharesUp > 0) {
+                currentValueUp = market.sharesUp * market.currentPriceUp;
+                pnlUp = currentValueUp - market.investedUp;
+            }
+
+            if (market.currentPriceDown !== undefined && market.sharesDown > 0) {
+                currentValueDown = market.sharesDown * market.currentPriceDown;
+                pnlDown = currentValueDown - market.investedDown;
+            }
+
+            totalPnl = pnlUp + pnlDown;
             
-            // DOWN stats
-        console.log(chalk.red(`  📉 DOWN:`));
-        console.log(chalk.red(`     Shares: ${market.sharesDown.toFixed(4)}`));
-        console.log(chalk.red(`     Invested: $${market.investedDown.toFixed(2)}`));
-        console.log(chalk.red(`     Avg Price: $${avgPriceDown.toFixed(4)}`));
-        console.log(chalk.red(`     Trades: ${market.tradesDown}`));
+            // Compact display format
+            const marketNameDisplay = market.marketName.length > 50 
+                ? market.marketName.substring(0, 47) + '...' 
+                : market.marketName;
             
-            // Summary
-        console.log(chalk.cyan(`  💰 Total Invested: $${totalInvested.toFixed(2)}`));
-        console.log(chalk.cyan(`  📊 Split: ${upPercent.toFixed(1)}% UP / ${downPercent.toFixed(1)}% DOWN`));
+            console.log(chalk.yellow.bold(`┌─ ${market.marketKey}`));
+            console.log(chalk.gray(`│  ${marketNameDisplay}`));
             
-            // Visual bar
-            const barLength = 40;
+            // UP line - compact
+            const upLine = `│  ${chalk.green('📈 UP')}: ${market.sharesUp.toFixed(2)} shares | $${market.investedUp.toFixed(2)} @ $${avgPriceUp.toFixed(4)}`;
+            if (market.currentPriceUp !== undefined) {
+                const pnlColor = pnlUp >= 0 ? chalk.green : chalk.red;
+                const pnlSign = pnlUp >= 0 ? '+' : '';
+                const pnlPercent = market.investedUp > 0 ? ((pnlUp / market.investedUp) * 100).toFixed(1) : '0.0';
+                console.log(`${upLine} | Now: $${market.currentPriceUp.toFixed(4)} | ${pnlColor(`${pnlSign}$${pnlUp.toFixed(2)} (${pnlPercent}%)`)} | ${market.tradesUp} trades`);
+            } else {
+                console.log(`${upLine} | ${market.tradesUp} trades`);
+            }
+            
+            // DOWN line - compact
+            const downLine = `│  ${chalk.red('📉 DOWN')}: ${market.sharesDown.toFixed(2)} shares | $${market.investedDown.toFixed(2)} @ $${avgPriceDown.toFixed(4)}`;
+            if (market.currentPriceDown !== undefined) {
+                const pnlColor = pnlDown >= 0 ? chalk.green : chalk.red;
+                const pnlSign = pnlDown >= 0 ? '+' : '';
+                const pnlPercent = market.investedDown > 0 ? ((pnlDown / market.investedDown) * 100).toFixed(1) : '0.0';
+                console.log(`${downLine} | Now: $${market.currentPriceDown.toFixed(4)} | ${pnlColor(`${pnlSign}$${pnlDown.toFixed(2)} (${pnlPercent}%)`)} | ${market.tradesDown} trades`);
+            } else {
+                console.log(`${downLine} | ${market.tradesDown} trades`);
+            }
+            
+            // Summary line - compact
+            const totalCurrentValue = currentValueUp + currentValueDown;
+            const totalPnlColor = totalPnl >= 0 ? chalk.green : chalk.red;
+            const totalPnlSign = totalPnl >= 0 ? '+' : '';
+            const totalPnlPercent = totalInvested > 0 ? ((totalPnl / totalInvested) * 100).toFixed(1) : '0.0';
+            
+            if (totalPnl !== 0 || (market.currentPriceUp !== undefined || market.currentPriceDown !== undefined)) {
+                console.log(chalk.cyan(`│  💰 Invested: $${totalInvested.toFixed(2)} | Value: $${totalCurrentValue.toFixed(2)} | ${totalPnlColor(`PnL: ${totalPnlSign}$${totalPnl.toFixed(2)} (${totalPnlPercent}%)`)}`));
+            } else {
+                console.log(chalk.cyan(`│  💰 Total Invested: $${totalInvested.toFixed(2)}`));
+            }
+            
+            // Visual bar - compact
+            const barLength = 30;
             const upBars = Math.round((upPercent / 100) * barLength);
             const downBars = barLength - upBars;
             const upBar = chalk.green('█'.repeat(upBars));
             const downBar = chalk.red('█'.repeat(downBars));
-        console.log(chalk.gray(`  [${upBar}${downBar}]`));
-        console.log(''); // Empty line between markets
+            console.log(chalk.gray(`│  [${upBar}${downBar}] ${upPercent.toFixed(1)}% UP / ${downPercent.toFixed(1)}% DOWN`));
+            console.log(chalk.gray('└' + '─'.repeat(78)));
+            console.log(''); // Empty line between markets
         }
 
         console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));

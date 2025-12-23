@@ -298,7 +298,7 @@ const tradeMonitor = async () => {
         await fetchTradeData();
         
         // Display market stats periodically
-        marketTracker.displayStats();
+        await marketTracker.displayStats();
         
         if (!isRunning) break;
         await new Promise((resolve) => setTimeout(resolve, FETCH_INTERVAL * 1000));
