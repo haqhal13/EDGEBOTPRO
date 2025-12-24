@@ -2,6 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ENV } from '../config/env';
 import fetchData from '../utils/fetchData';
+import priceStreamLogger from './priceStreamLogger';
+import { getRunId } from '../utils/runId';
 
 interface TradeLog {
     timestamp: number;
@@ -24,49 +26,80 @@ interface TradeLog {
     marketKey?: string;
 }
 
+/**
+ * Helper function to break down timestamp into detailed components
+ */
+function getTimestampBreakdown(timestamp: number): {
+    year: number;
+    month: number;
+    day: number;
+    hour: number;
+    minute: number;
+    second: number;
+    millisecond: number;
+} {
+    const date = new Date(timestamp);
+    return {
+        year: date.getUTCFullYear(),
+        month: date.getUTCMonth() + 1, // 1-12
+        day: date.getUTCDate(),
+        hour: date.getUTCHours(),
+        minute: date.getUTCMinutes(),
+        second: date.getUTCSeconds(),
+        millisecond: date.getUTCMilliseconds(),
+    };
+}
+
 class TradeLogger {
     private csvFilePath: string;
     private loggedTrades: Set<string> = new Set(); // Track trades already logged
 
     constructor() {
-        // Initialize CSV file path in logs directory
+        // Initialize CSV file path in logs directory with run ID
         const logsDir = path.join(process.cwd(), 'logs');
         if (!fs.existsSync(logsDir)) {
             fs.mkdirSync(logsDir, { recursive: true });
         }
-        this.csvFilePath = path.join(logsDir, 'trades_log.csv');
+        const runId = getRunId();
+        this.csvFilePath = path.join(logsDir, `watcher_trades_${runId}.csv`);
         this.initializeCsvFile();
     }
 
     /**
-     * Initialize CSV file with headers if it doesn't exist
+     * Initialize CSV file with headers (always create new file for each run)
      */
     private initializeCsvFile(): void {
-        if (!fs.existsSync(this.csvFilePath)) {
-            const headers = [
-                'Timestamp',
-                'Date',
-                'Trader Address',
-                'Trader Name',
-                'Transaction Hash',
-                'Condition ID',
-                'Market Name',
-                'Market Slug',
-                'Market Key',
-                'Side',
-                'Outcome',
-                'Outcome Index',
-                'Asset',
-                'Size (Shares)',
-                'Price per Share ($)',
-                'Total Value ($)',
-                'Market Price UP ($)',
-                'Market Price DOWN ($)',
-                'Price Difference UP',
-                'Price Difference DOWN'
-            ].join(',');
-            fs.writeFileSync(this.csvFilePath, headers + '\n', 'utf8');
-        }
+        const headers = [
+            'Timestamp',
+            'Date',
+            'Year',
+            'Month',
+            'Day',
+            'Hour',
+            'Minute',
+            'Second',
+            'Millisecond',
+            'Trader Address',
+            'Trader Name',
+            'Transaction Hash',
+            'Condition ID',
+            'Market Name',
+            'Market Slug',
+            'Market Key',
+            'Side',
+            'Outcome',
+            'Outcome Index',
+            'Asset',
+            'Size (Shares)',
+            'Price per Share ($)',
+            'Total Value ($)',
+            'Market Price UP ($)',
+            'Market Price DOWN ($)',
+            'Price Difference UP',
+            'Price Difference DOWN',
+            'Entry Type'
+        ].join(',');
+        fs.writeFileSync(this.csvFilePath, headers + '\n', 'utf8');
     }
 
     /**
@@ -250,6 +283,7 @@ class TradeLogger {
             
             const timestamp = activity.timestamp ? activity.timestamp * 1000 : Date.now();
             const date = new Date(timestamp).toISOString();
+            const timeBreakdown = getTimestampBreakdown(timestamp);
             
             const tradePrice = parseFloat(activity.price || '0');
             const size = parseFloat(activity.size || '0');
@@ -262,6 +296,13 @@ class TradeLogger {
             const row = [
                 timestamp,
                 date,
+                timeBreakdown.year,
+                timeBreakdown.month,
+                timeBreakdown.day,
+                timeBreakdown.hour,
+                timeBreakdown.minute,
+                timeBreakdown.second,
+                timeBreakdown.millisecond,
                 traderAddress,
                 activity.name || activity.pseudonym || '',
                 activity.transactionHash || '',
@@ -279,12 +320,23 @@ class TradeLogger {
                 prices.priceUp.toFixed(4),
                 prices.priceDown.toFixed(4),
                 priceDifferenceUp.toFixed(4),
-                priceDifferenceDown.toFixed(4)
+                priceDifferenceDown.toFixed(4),
+                'WATCH' // Entry Type
             ].join(',');
 
             // Append to CSV file
             fs.appendFileSync(this.csvFilePath, row + '\n', 'utf8');
             this.loggedTrades.add(tradeKey);
+
+            // Log to price stream with watch mode entry marker
+            const marketTitle = activity.title || activity.slug || 'Unknown';
+            priceStreamLogger.markWatchEntry(
+                activity.slug || '',
+                marketTitle,
+                prices.priceUp,
+                prices.priceDown,
+                `Watch mode trade: ${outcome} ${size.toFixed(4)} shares @ $${tradePrice.toFixed(4)}`
+            );
         } catch (error) {
             console.error(`Failed to log trade to CSV: ${error}`);
         }

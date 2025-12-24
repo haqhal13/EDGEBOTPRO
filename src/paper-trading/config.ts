@@ -180,14 +180,14 @@ export const DEFAULT_CONFIG: DualSideStrategyConfig = {
         maxActiveMarkets: 10,       // Max 10 concurrent markets
         maxCapitalDeployedPercent: 0.80, // Max 80% of capital deployed
 
-        minSecondsBetweenTrades: 5,     // 5 seconds between any trades
-        minSecondsBetweenSameMarket: 15, // 15 seconds between same-market trades
+        minSecondsBetweenTrades: 3,     // 3 seconds between any trades (more frequent like target trader)
+        minSecondsBetweenSameMarket: 10, // 10 seconds between same-market trades
 
-        skewStabilityWindow: 30,        // 30 seconds for stability check
-        skewVolatilityThreshold: 0.05,  // 5% change = volatile
+        skewStabilityWindow: 10,        // 10 seconds for stability check (more reactive to skew)
+        skewVolatilityThreshold: 0.15,  // 15% change = volatile (allow more movement before blocking)
 
-        allocationGapThreshold: 0.05,   // 5% gap minimum to trade
-        rebalanceThreshold: 0.10,       // 10% gap to trigger rebalance
+        allocationGapThreshold: 0.03,   // 3% gap minimum to trade (tighter, more trades)
+        rebalanceThreshold: 0.07,       // 7% gap to trigger rebalance
     },
 
     marketFilter: {

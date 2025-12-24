@@ -105,6 +105,23 @@ export const main = async () => {
             await closeMarketPositions(clobClientForClosing, market);
         });
         
+        // Display CSV file information
+        const { getRunId } = await import('./utils/runId');
+        const runId = getRunId();
+        Logger.separator();
+        Logger.info('📁 CSV Files Initialized (Run ID: ' + runId + ')');
+        Logger.info('   • watcher_trades_' + runId + '.csv');
+        Logger.info('   • watcher_market_pnl_' + runId + '.csv');
+        Logger.info('   • btc_15m_prices_' + runId + '.csv');
+        Logger.info('   • eth_15m_prices_' + runId + '.csv');
+        Logger.info('   • btc_1h_prices_' + runId + '.csv');
+        Logger.info('   • eth_1h_prices_' + runId + '.csv');
+        if (!ENV.TRACK_ONLY_MODE) {
+            Logger.info('   • paper_trades_' + runId + '.csv');
+            Logger.info('   • paper_trading_pnl_' + runId + '.csv');
+        }
+        Logger.separator();
+        
         Logger.info('Starting trade monitor...');
         tradeMonitor();
 
