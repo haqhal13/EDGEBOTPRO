@@ -1772,111 +1772,101 @@ class MarketTracker {
             }
             
             // Compact display format
-            const marketNameDisplay = market.marketName.length > 50 
-                ? market.marketName.substring(0, 47) + '...' 
+            const marketNameDisplay = market.marketName.length > 65
+                ? market.marketName.substring(0, 62) + '...'
                 : market.marketName;
-            
-            outputLines.push(chalk.yellow.bold(`┌─ ${market.marketKey}`));
+
+            // Calculate time left
+            let timeLeftStr = '';
+            if (market.endDate && market.endDate > 0) {
+                const endDateMs = market.endDate < 10000000000 ? market.endDate * 1000 : market.endDate;
+                const timeLeftMs = endDateMs - now;
+                if (timeLeftMs > 0) {
+                    const mins = Math.floor(timeLeftMs / 60000);
+                    const secs = Math.floor((timeLeftMs % 60000) / 1000);
+                    timeLeftStr = `⏱️ ${mins}m ${secs}s left`;
+                } else {
+                    timeLeftStr = '⌛ Expired';
+                }
+            }
+
+            outputLines.push(chalk.yellow(`┌─ ${market.marketKey} ${timeLeftStr}`));
             outputLines.push(chalk.gray(`│  ${marketNameDisplay}`));
             
-            // UP line - with live prices prominently displayed
-            const upLine = `│  ${chalk.green('📈 UP')}: ${market.sharesUp.toFixed(2)} shares | $${market.investedUp.toFixed(2)} @ $${avgPriceUp.toFixed(4)} avg`;
-            if (hasValidPriceUp) {
-                const pnlColor = pnlUp >= 0 ? chalk.green : chalk.red;
-                const pnlSign = pnlUp >= 0 ? '+' : '';
-                const pnlPercent = market.totalCostUp > 0 ? ((pnlUp / market.totalCostUp) * 100).toFixed(1) : '0.0';
-                // Display live price prominently
-                outputLines.push(`${upLine} | ${chalk.yellow.bold(`LIVE: $${market.currentPriceUp!.toFixed(4)}`)} | ${pnlColor(`${pnlSign}$${pnlUp.toFixed(2)} (${pnlPercent}%)`)} | ${market.tradesUp} trades`);
-            } else {
-                outputLines.push(`${upLine} | ${chalk.gray('LIVE: fetching...')} | ${market.tradesUp} trades`);
-            }
-            
-            // DOWN line - with live prices prominently displayed
-            const downLine = `│  ${chalk.red('📉 DOWN')}: ${market.sharesDown.toFixed(2)} shares | $${market.investedDown.toFixed(2)} @ $${avgPriceDown.toFixed(4)} avg`;
-            if (hasValidPriceDown) {
-                const pnlColor = pnlDown >= 0 ? chalk.green : chalk.red;
-                const pnlSign = pnlDown >= 0 ? '+' : '';
-                const pnlPercent = market.totalCostDown > 0 ? ((pnlDown / market.totalCostDown) * 100).toFixed(1) : '0.0';
-                // Display live price prominently
-                outputLines.push(`${downLine} | ${chalk.yellow.bold(`LIVE: $${market.currentPriceDown!.toFixed(4)}`)} | ${pnlColor(`${pnlSign}$${pnlDown.toFixed(2)} (${pnlPercent}%)`)} | ${market.tradesDown} trades`);
-            } else {
-                outputLines.push(`${downLine} | ${chalk.gray('LIVE: fetching...')} | ${market.tradesDown} trades`);
-            }
-            
-            // Add live price summary line for easy comparison
+            // UP line - matching paper mode format
+            const upLiveStr = hasValidPriceUp ? chalk.yellow.bold(`LIVE: $${market.currentPriceUp!.toFixed(4)}`) : chalk.gray('LIVE: fetching...');
+            const upPnlColor = pnlUp >= 0 ? chalk.green : chalk.red;
+            const upPnlStr = hasValidPriceUp ? upPnlColor(`${pnlUp >= 0 ? '+' : ''}$${pnlUp.toFixed(2)} (${market.totalCostUp > 0 ? ((pnlUp/market.totalCostUp)*100).toFixed(1) : '0.0'}%)`) : '';
+            outputLines.push(chalk.gray(`│  `) + chalk.green('📈 UP:   ') + chalk.white(`${market.sharesUp.toFixed(2)} shares | $${market.investedUp.toFixed(2)} @ $${avgPriceUp.toFixed(4)} avg | `) + upLiveStr + chalk.white(' | ') + upPnlStr + chalk.gray(` | ${market.tradesUp} trades`));
+
+            // DOWN line - matching paper mode format
+            const downLiveStr = hasValidPriceDown ? chalk.yellow.bold(`LIVE: $${market.currentPriceDown!.toFixed(4)}`) : chalk.gray('LIVE: fetching...');
+            const downPnlColor = pnlDown >= 0 ? chalk.green : chalk.red;
+            const downPnlStr = hasValidPriceDown ? downPnlColor(`${pnlDown >= 0 ? '+' : ''}$${pnlDown.toFixed(2)} (${market.totalCostDown > 0 ? ((pnlDown/market.totalCostDown)*100).toFixed(1) : '0.0'}%)`) : '';
+            outputLines.push(chalk.gray(`│  `) + chalk.red('📉 DOWN: ') + chalk.white(`${market.sharesDown.toFixed(2)} shares | $${market.investedDown.toFixed(2)} @ $${avgPriceDown.toFixed(4)} avg | `) + downLiveStr + chalk.white(' | ') + downPnlStr + chalk.gray(` | ${market.tradesDown} trades`));
+
+            // Live price sum check
             if (hasValidPriceUp && hasValidPriceDown) {
                 const liveSum = market.currentPriceUp! + market.currentPriceDown!;
-                const sumColor = Math.abs(liveSum - 1.0) < 0.01 ? chalk.green : chalk.yellow;
-                outputLines.push(chalk.gray(`│  💵 Live Prices: UP $${market.currentPriceUp!.toFixed(4)} + DOWN $${market.currentPriceDown!.toFixed(4)} = ${sumColor(`$${liveSum.toFixed(4)}`)} (should be ~$1.00)`));
+                const sumStatus = Math.abs(liveSum - 1.0) < 0.02 ? chalk.green('✓') : chalk.yellow('⚠️');
+                outputLines.push(chalk.gray(`│  💵 Live Prices: UP $${market.currentPriceUp!.toFixed(4)} + DOWN $${market.currentPriceDown!.toFixed(4)} = $${liveSum.toFixed(4)} `) + sumStatus);
             }
-            
-            // Summary line - compact
+
+            // Summary line with PnL
             const totalCurrentValue = currentValueUp + currentValueDown;
             const totalPnlColor = totalPnl >= 0 ? chalk.green : chalk.red;
             const totalPnlSign = totalPnl >= 0 ? '+' : '';
-            // Calculate total cost basis (more accurate than invested for PnL %)
             const marketCostBasis = market.totalCostUp + market.totalCostDown;
             const totalPnlPercent = marketCostBasis > 0 ? ((totalPnl / marketCostBasis) * 100).toFixed(1) : '0.0';
-            
+
             if (totalPnl !== 0 || (hasValidPriceUp || hasValidPriceDown)) {
-                outputLines.push(chalk.cyan(`│  💰 Invested: $${totalInvested.toFixed(2)} | Value: $${totalCurrentValue.toFixed(2)} | ${totalPnlColor(`PnL: ${totalPnlSign}$${totalPnl.toFixed(2)} (${totalPnlPercent}%)`)}`));
+                outputLines.push(chalk.gray(`│  💰 Invested: $${totalInvested.toFixed(2)} | Value: $${totalCurrentValue.toFixed(2)} | PnL: `) + totalPnlColor(`${totalPnlSign}$${totalPnl.toFixed(2)} (${totalPnlSign}${totalPnlPercent}%)`));
             } else {
-                outputLines.push(chalk.cyan(`│  💰 Total Invested: $${totalInvested.toFixed(2)}`));
+                outputLines.push(chalk.gray(`│  💰 Total Invested: $${totalInvested.toFixed(2)} | ${market.tradesUp + market.tradesDown} trades`));
             }
-            
-            // Visual bar - compact
-            const barLength = 30;
+
+            // Visual bar - colorful like paper mode (40 chars)
+            const barLength = 40;
             const upBars = Math.round((upPercent / 100) * barLength);
             const downBars = barLength - upBars;
             const upBar = chalk.green('█'.repeat(upBars));
             const downBar = chalk.red('█'.repeat(downBars));
-            outputLines.push(chalk.gray(`│  [${upBar}${downBar}] ${upPercent.toFixed(1)}% UP / ${downPercent.toFixed(1)}% DOWN`));
-            outputLines.push(chalk.gray('└' + '─'.repeat(78)));
+            outputLines.push(chalk.gray(`│  [`) + upBar + downBar + chalk.gray(`] `) + chalk.green(`${upPercent.toFixed(1)}% UP`) + chalk.gray(' / ') + chalk.red(`${downPercent.toFixed(1)}% DOWN`));
+            outputLines.push(chalk.yellow('└' + '─'.repeat(80)));
             outputLines.push(''); // Empty line between markets
         }
 
-        // Display summary grouped by market type
-        outputLines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-        outputLines.push(chalk.yellow.bold('  📊 PORTFOLIO SUMMARY'));
-        
-        // 15-minute markets summary (BTC-UpDown-15 + ETH-UpDown-15)
-        const pnl15mColor = totalPnl15m >= 0 ? chalk.green : chalk.red;
+        // Portfolio Summary Section - matching paper mode format
+        outputLines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+        outputLines.push(chalk.cyan.bold('  📊 PORTFOLIO SUMMARY'));
+
+        // 15-minute markets summary
         const pnl15mSign = totalPnl15m >= 0 ? '+' : '';
         const pnl15mPercent = totalCostBasis15m > 0 ? ((totalPnl15m / totalCostBasis15m) * 100).toFixed(2) : '0.00';
-        
-        outputLines.push(chalk.yellow.bold('  ⏱️  15-Minute Markets (BTC + ETH)'));
-        outputLines.push(chalk.cyan(`    Total Invested: ${chalk.white(`$${totalInvested15m.toFixed(2)}`)}`));
-        outputLines.push(chalk.cyan(`    Cost Basis:     ${chalk.white(`$${totalCostBasis15m.toFixed(2)}`)} ${chalk.gray('(actual cost)' )}`));
-        outputLines.push(chalk.cyan(`    Current Value:  ${chalk.white(`$${totalValue15m.toFixed(2)}`)}`));
-        outputLines.push(chalk.cyan(`    Total PnL:      ${pnl15mColor(`${pnl15mSign}$${totalPnl15m.toFixed(2)} (${pnl15mSign}${pnl15mPercent}%)`)}`));
-        outputLines.push(chalk.cyan(`    Total Trades:   ${chalk.white(totalTrades15m.toString())}`));
+        const pnl15mColor = totalPnl15m >= 0 ? chalk.green : chalk.red;
         outputLines.push('');
-        
-        // 1-hour markets summary (BTC-UpDown-1h + ETH-UpDown-1h)
-        const pnl1hColor = totalPnl1h >= 0 ? chalk.green : chalk.red;
+        outputLines.push(chalk.white.bold('  ⏱️  15-Minute Markets (BTC + ETH)'));
+        outputLines.push(chalk.gray(`    Invested: $${totalInvested15m.toFixed(2)} | Value: $${totalValue15m.toFixed(2)} | PnL: `) + pnl15mColor(`${pnl15mSign}$${totalPnl15m.toFixed(2)} (${pnl15mSign}${pnl15mPercent}%)`) + chalk.gray(` | Trades: ${totalTrades15m}`));
+
+        // 1-hour markets summary
         const pnl1hSign = totalPnl1h >= 0 ? '+' : '';
         const pnl1hPercent = totalCostBasis1h > 0 ? ((totalPnl1h / totalCostBasis1h) * 100).toFixed(2) : '0.00';
-        
-        outputLines.push(chalk.yellow.bold('  🕐 1-Hour Markets (BTC + ETH)'));
-        outputLines.push(chalk.cyan(`    Total Invested: ${chalk.white(`$${totalInvested1h.toFixed(2)}`)}`));
-        outputLines.push(chalk.cyan(`    Cost Basis:     ${chalk.white(`$${totalCostBasis1h.toFixed(2)}`)} ${chalk.gray('(actual cost)' )}`));
-        outputLines.push(chalk.cyan(`    Current Value:  ${chalk.white(`$${totalValue1h.toFixed(2)}`)}`));
-        outputLines.push(chalk.cyan(`    Total PnL:      ${pnl1hColor(`${pnl1hSign}$${totalPnl1h.toFixed(2)} (${pnl1hSign}${pnl1hPercent}%)`)}`));
-        outputLines.push(chalk.cyan(`    Total Trades:   ${chalk.white(totalTrades1h.toString())}`));
+        const pnl1hColor = totalPnl1h >= 0 ? chalk.green : chalk.red;
         outputLines.push('');
-        
-        // Total summary (all markets combined)
-        const totalPnlColor = totalPnlAll >= 0 ? chalk.green : chalk.red;
+        outputLines.push(chalk.white.bold('  🕐 1-Hour Markets (BTC + ETH)'));
+        outputLines.push(chalk.gray(`    Invested: $${totalInvested1h.toFixed(2)} | Value: $${totalValue1h.toFixed(2)} | PnL: `) + pnl1hColor(`${pnl1hSign}$${totalPnl1h.toFixed(2)} (${pnl1hSign}${pnl1hPercent}%)`) + chalk.gray(` | Trades: ${totalTrades1h}`));
+
+        // Total summary
         const totalPnlSign = totalPnlAll >= 0 ? '+' : '';
         const totalPnlPercent = totalCostBasisAll > 0 ? ((totalPnlAll / totalCostBasisAll) * 100).toFixed(2) : '0.00';
-        
+        const totalPnlAllColor = totalPnlAll >= 0 ? chalk.green : chalk.red;
+
+        outputLines.push('');
         outputLines.push(chalk.yellow.bold('  📈 TOTAL (All Markets)'));
-        outputLines.push(chalk.cyan(`    Total Invested: ${chalk.white(`$${totalInvestedAll.toFixed(2)}`)}`));
-        outputLines.push(chalk.cyan(`    Cost Basis:     ${chalk.white(`$${totalCostBasisAll.toFixed(2)}`)} ${chalk.gray('(actual cost)' )}`));
-        outputLines.push(chalk.cyan(`    Current Value:  ${chalk.white(`$${totalValueAll.toFixed(2)}`)}`));
-        outputLines.push(chalk.cyan(`    Total PnL:      ${totalPnlColor(`${totalPnlSign}$${totalPnlAll.toFixed(2)} (${totalPnlSign}${totalPnlPercent}%)`)}`));
-        outputLines.push(chalk.cyan(`    Total Trades:   ${chalk.white(totalTradesAll.toString())}`));
-        outputLines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+        outputLines.push(chalk.white(`    Invested: $${totalInvestedAll.toFixed(2)} | Value: $${totalValueAll.toFixed(2)}`));
+        outputLines.push(chalk.gray('    PnL: ') + totalPnlAllColor.bold(`${totalPnlSign}$${totalPnlAll.toFixed(2)} (${totalPnlSign}${totalPnlPercent}%)`) + chalk.gray(` | Total Trades: ${totalTradesAll}`));
+
+        outputLines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
         outputLines.push(''); // Empty line at end
 
         // Clear screen and print everything at once
