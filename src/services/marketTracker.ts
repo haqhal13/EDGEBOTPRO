@@ -1537,18 +1537,28 @@ class MarketTracker {
         const pricePromises = activeMarkets.map(m => this.fetchCurrentPrices(m));
         await Promise.allSettled(pricePromises);
 
-        // Capture closing price snapshot shortly before market end
+        // Capture closing price snapshot around 2 minutes before market switches to next market
+        // This ensures PnL is recorded with prices from ~2 minutes before market switch
+        const SNAPSHOT_WINDOW_MS = 2 * 60 * 1000; // 2 minutes
+        const SNAPSHOT_EARLY_MS = 30 * 1000; // 30 seconds buffer (capture between 2:00-1:30 before end)
         for (const m of activeMarkets) {
             if (
                 m.endDate &&
-                now >= m.endDate - 5000 && // within last 5 seconds before scheduled end
                 m.closingPriceUp === undefined &&
                 m.closingPriceDown === undefined &&
                 m.currentPriceUp !== undefined &&
                 m.currentPriceDown !== undefined
             ) {
-                m.closingPriceUp = m.currentPriceUp;
-                m.closingPriceDown = m.currentPriceDown;
+                const timeUntilEnd = m.endDate - now;
+                // Capture when we're between 2 minutes and 1.5 minutes before market end
+                // This gives us a ~30 second window to capture the snapshot
+                if (
+                    timeUntilEnd <= SNAPSHOT_WINDOW_MS &&
+                    timeUntilEnd >= (SNAPSHOT_WINDOW_MS - SNAPSHOT_EARLY_MS)
+                ) {
+                    m.closingPriceUp = m.currentPriceUp;
+                    m.closingPriceDown = m.currentPriceDown;
+                }
             }
         }
 

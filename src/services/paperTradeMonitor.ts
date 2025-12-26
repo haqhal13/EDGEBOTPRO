@@ -262,6 +262,147 @@ async function fetchMarketExpiration(conditionId: string): Promise<number | null
     return null;
 }
 
+// Track which slugs we've already tried to fetch (to avoid repeated API calls)
+const fetchedSlugs = new Set<string>();
+
+/**
+ * PROACTIVE MARKET DISCOVERY
+ * Instead of waiting for watcher to trade, directly search for the 4 market types:
+ * - BTC 15-min: btc-updown-15m-{timestamp}
+ * - ETH 15-min: eth-updown-15m-{timestamp}
+ * - BTC Hourly: bitcoin-up-or-down-{month}-{day}-{hour}am-et
+ * - ETH Hourly: ethereum-up-or-down-{month}-{day}-{hour}am-et
+ */
+async function proactivelyDiscoverMarkets(): Promise<void> {
+    const now = Date.now();
+
+    // Calculate 15-minute boundaries (markets start at :00, :15, :30, :45)
+    const FIFTEEN_MIN_MS = 15 * 60 * 1000;
+    const currentWindowStart = Math.floor(now / FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS;
+    const nextWindowStart = currentWindowStart + FIFTEEN_MIN_MS;
+
+    // Generate 15-minute market slugs (current and next window)
+    const btcSlugCurrent = `btc-updown-15m-${Math.floor(currentWindowStart / 1000)}`;
+    const ethSlugCurrent = `eth-updown-15m-${Math.floor(currentWindowStart / 1000)}`;
+    const btcSlugNext = `btc-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
+    const ethSlugNext = `eth-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
+
+    // Generate hourly market slugs
+    const currentDate = new Date();
+    const currentHour = currentDate.getHours();
+    const nextHour = (currentHour + 1) % 24;
+
+    // Format: "december-26-8am-et"
+    const months = ['january', 'february', 'march', 'april', 'may', 'june',
+        'july', 'august', 'september', 'october', 'november', 'december'];
+    const month = months[currentDate.getMonth()];
+    const day = currentDate.getDate();
+
+    const formatHour = (h: number) => h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`;
+
+    const btcHourlyCurrent = `bitcoin-up-or-down-${month}-${day}-${formatHour(currentHour)}-et`;
+    const ethHourlyCurrent = `ethereum-up-or-down-${month}-${day}-${formatHour(currentHour)}-et`;
+    const btcHourlyNext = `bitcoin-up-or-down-${month}-${day}-${formatHour(nextHour)}-et`;
+    const ethHourlyNext = `ethereum-up-or-down-${month}-${day}-${formatHour(nextHour)}-et`;
+
+    // All slugs to check
+    const slugsToCheck = [
+        btcSlugCurrent, ethSlugCurrent, btcSlugNext, ethSlugNext,
+        btcHourlyCurrent, ethHourlyCurrent, btcHourlyNext, ethHourlyNext
+    ];
+
+    // Fetch markets in parallel for speed
+    const fetchPromises = slugsToCheck.map(async (slug) => {
+        // Skip if already fetched or already discovered
+        if (fetchedSlugs.has(slug)) return;
+
+        // Check if we already have this market by slug
+        for (const [_, market] of discoveredMarkets.entries()) {
+            if (market.marketSlug === slug) return;
+        }
+
+        fetchedSlugs.add(slug);
+
+        try {
+            const url = `https://gamma-api.polymarket.com/events?slug=${slug}`;
+            const data = await fetchData(url).catch(() => null);
+
+            if (data && Array.isArray(data) && data.length > 0) {
+                const event = data[0];
+
+                // Extract market data from nested structure
+                const markets = event.markets || [];
+                if (markets.length === 0) return;
+
+                const market = markets[0];
+                const conditionId = market.conditionId || market.condition_id;
+                const clobTokenIds = market.clobTokenIds || [];
+
+                if (!conditionId || clobTokenIds.length < 2) return;
+
+                // Determine which token is UP and which is DOWN
+                const outcomes = market.outcomes || ['Up', 'Down'];
+                const isFirstUp = outcomes[0]?.toLowerCase().includes('up');
+                const assetUp = isFirstUp ? clobTokenIds[0] : clobTokenIds[1];
+                const assetDown = isFirstUp ? clobTokenIds[1] : clobTokenIds[0];
+
+                // Parse endDate
+                let endDate = 0;
+                if (market.endDate) {
+                    endDate = typeof market.endDate === 'string'
+                        ? new Date(market.endDate).getTime()
+                        : market.endDate < 10000000000 ? market.endDate * 1000 : market.endDate;
+                } else if (event.endDate) {
+                    endDate = typeof event.endDate === 'string'
+                        ? new Date(event.endDate).getTime()
+                        : event.endDate < 10000000000 ? event.endDate * 1000 : event.endDate;
+                }
+
+                // Skip if expired
+                if (endDate && endDate < now - 60000) return;
+
+                // Get market title and key
+                const title = market.question || event.title || slug;
+                const marketKey = getMarketKey(title);
+
+                // Add to discovered markets
+                const newMarket = {
+                    conditionId,
+                    marketKey,
+                    marketName: title,
+                    marketSlug: slug,
+                    assetUp,
+                    assetDown,
+                    endDate,
+                    priceUp: 0.5,
+                    priceDown: 0.5,
+                    lastUpdate: now,
+                };
+
+                if (!discoveredMarkets.has(conditionId)) {
+                    discoveredMarkets.set(conditionId, newMarket);
+                    proactivelyDiscoveredIds.add(conditionId);
+
+                    const timeLeftMin = endDate ? Math.floor((endDate - now) / 60000) : 0;
+                    debugLog(`🎯 PROACTIVE DISCOVERY: ${marketKey} | ${slug} | ${timeLeftMin}m left`);
+                    Logger.success(`🎯 PROACTIVE: Found ${marketKey} | ${timeLeftMin}m remaining`);
+                }
+            }
+        } catch (e) {
+            // Silent fail - will retry next loop
+            debugLog(`Proactive fetch failed for ${slug}: ${e}`);
+        }
+    });
+
+    // Wait for all fetches to complete (parallel for speed)
+    await Promise.all(fetchPromises);
+
+    // Clear old slugs from cache (keep only last hour's worth)
+    if (fetchedSlugs.size > 100) {
+        fetchedSlugs.clear();
+    }
+}
+
 /**
  * Get market key from title
  */
@@ -1191,46 +1332,228 @@ function displayStatus(): void {
     // Show paper bot's own status - use success for visibility
     console.log(`\n🤖 PAPER ARB: Capital $${currentCapital.toFixed(2)} | Building: ${buildingPositions.size} | Positions: ${activePositions.length} | Trades: ${totalTrades}`);
 
-    // Filter out expired markets for display
+    // Filter out expired markets and only show markets that correspond to current ET time
+    // Only show the 4 active markets: current BTC 15m, current ETH 15m, current BTC 1h, current ETH 1h
+    const isMarketCurrentlyActive = (marketName: string, marketKey: string): boolean => {
+        // Get current ET time
+        const etFormatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+        });
+        const etParts = etFormatter.formatToParts(new Date(now));
+        const currentHour = parseInt(etParts.find(p => p.type === 'hour')?.value || '0', 10);
+        const currentMinute = parseInt(etParts.find(p => p.type === 'minute')?.value || '0', 10);
+        
+        // Check if it's a 15-minute market
+        const is15Min = marketKey.includes('-15');
+        
+        if (is15Min) {
+            // For 15-minute markets: extract time window (e.g., "10:00AM-10:15AM ET")
+            // Current market should be: floor(currentMinute/15)*15 to floor(currentMinute/15)*15 + 15
+            const current15MinStart = Math.floor(currentMinute / 15) * 15;
+            
+            // Extract time window from market name - pattern: "HH:MMAM-PM - HH:MMAM-PM" or "HH:MM - HH:MM"
+            const timeWindowPattern = /(\d{1,2}):(\d{2})\s*([AP]M)?\s*[-–]\s*(\d{1,2}):(\d{2})\s*([AP]M)?/i;
+            const match = marketName.match(timeWindowPattern);
+            if (!match) return false;
+            
+            let startHour = parseInt(match[1], 10);
+            const startMinute = parseInt(match[2], 10);
+            const startAMPM = match[3]?.toUpperCase();
+            
+            // Handle AM/PM for start time
+            if (startAMPM) {
+                if (startAMPM === 'PM' && startHour !== 12) startHour += 12;
+                if (startAMPM === 'AM' && startHour === 12) startHour = 0;
+            }
+            
+            // Check if market matches current 15-minute window
+            // Market should start at currentHour:current15MinStart
+            return startHour === currentHour && startMinute === current15MinStart;
+        } else {
+            // For 1-hour markets: extract hour (e.g., "10AM" from "Bitcoin Up or Down - December 25, 10AM ET")
+            // Pattern: number followed by optional AM/PM, followed by ET (with optional text in between)
+            const hourPattern = /(\d{1,2})\s*([AP]M)?\s*ET/i;
+            const match = marketName.match(hourPattern);
+            if (!match) return false;
+            
+            let marketHour = parseInt(match[1], 10);
+            const ampm = match[2]?.toUpperCase();
+            
+            // Handle AM/PM
+            if (ampm) {
+                if (ampm === 'PM' && marketHour !== 12) marketHour += 12;
+                if (ampm === 'AM' && marketHour === 12) marketHour = 0;
+            }
+            
+            // Check if market hour matches current hour
+            return marketHour === currentHour;
+        }
+    };
+    
     const activeMarkets = Array.from(discoveredMarkets.entries()).filter(
-        ([_, m]) => !m.endDate || m.endDate > now
+        ([id, m]) => {
+            // First filter: not expired
+            if (m.endDate && m.endDate <= now) return false;
+            
+            // Second filter: must correspond to current ET time
+            return isMarketCurrentlyActive(m.marketName, m.marketKey);
+        }
     );
 
-    // Show discovered markets with their status
-    if (activeMarkets.length === 0) {
+    // Group markets by base category (BTC-UpDown-15, ETH-UpDown-15, BTC-UpDown-1h, ETH-UpDown-1h)
+    // Extract base category from marketKey (e.g., "BTC-UpDown-1h-6" -> "BTC-UpDown-1h")
+    const groupedMarkets = new Map<string, Array<{ id: string; market: typeof discoveredMarkets extends Map<string, infer V> ? V : never }>>();
+    
+    for (const [id, m] of activeMarkets) {
+        // Extract base category
+        let baseCategory = m.marketKey;
+        if (m.marketKey.includes('-15')) {
+            baseCategory = m.marketKey.split('-').slice(0, 3).join('-'); // "BTC-UpDown-15"
+        } else if (m.marketKey.includes('-1h')) {
+            baseCategory = m.marketKey.split('-').slice(0, 3).join('-'); // "BTC-UpDown-1h"
+        }
+        
+        if (!groupedMarkets.has(baseCategory)) {
+            groupedMarkets.set(baseCategory, []);
+        }
+        groupedMarkets.get(baseCategory)!.push({ id, market: m });
+    }
+
+    // Show discovered markets with their status (grouped)
+    if (groupedMarkets.size === 0) {
         console.log(`   ⏳ Waiting for watcher to trade on new 15-min markets...`);
     }
 
-    for (const [id, m] of activeMarkets) {
-        const hasAssets = m.assetUp && m.assetDown;
-        // Calculate time left - handle both seconds and milliseconds
-        let timeLeft = 0;
-        if (m.endDate && m.endDate > 0) {
-            // If endDate is less than 10000000000, it's likely in seconds, convert to ms
-            const endDateMs = m.endDate < 10000000000 ? m.endDate * 1000 : m.endDate;
-            const timeDiff = endDateMs - now;
-            timeLeft = Math.max(0, Math.floor(timeDiff / 60000)); // Ensure non-negative
-        }
-        // Use conditionId (id) to look up position and build state
-        const hasPosition = positions.has(id);
-        const buildState = buildingPositions.get(id);
+    // Sort categories: 15m first, then 1h, then others
+    const sortedCategories = Array.from(groupedMarkets.entries()).sort((a, b) => {
+        const aIs15 = a[0].includes('-15');
+        const bIs15 = b[0].includes('-15');
+        const aIs1h = a[0].includes('-1h');
+        const bIs1h = b[0].includes('-1h');
+        
+        if (aIs15 && !bIs15) return -1;
+        if (!aIs15 && bIs15) return 1;
+        if (aIs1h && !bIs1h) return -1;
+        if (!aIs1h && bIs1h) return 1;
+        return a[0].localeCompare(b[0]);
+    });
 
-        if (!hasAssets) {
-            console.log(`   ⏳ ${m.marketKey}: Waiting for assets (UP:${m.assetUp ? '✓' : '✗'} DOWN:${m.assetDown ? '✓' : '✗'})`);
-        } else if (buildState) {
-            // Show building progress
-            const upPct = ((buildState.investedUp / buildState.targetUp) * 100).toFixed(0);
-            const downPct = ((buildState.investedDown / buildState.targetDown) * 100).toFixed(0);
-            console.log(`   📈 ${m.marketKey}: BUILDING ${buildState.tradeCount} trades | UP ${upPct}% DOWN ${downPct}% | ${timeLeft}m left`);
-        } else if (hasPosition) {
-            const pos = positions.get(id)!;
-            const status = pos.hasArbitragePosition ? '✅ARB' : '⏳WAIT';
-            const totalInv = pos.costUp + pos.costDown;
-            console.log(`   📊 ${m.marketKey}: ${status} $${totalInv.toFixed(2)} | ${timeLeft}m left`);
-        } else if (timeLeft < 2) {
-            console.log(`   ⏰ ${m.marketKey}: Too close to expiration (${timeLeft}m)`);
+    for (const [baseCategory, markets] of sortedCategories) {
+        // Aggregate stats for all markets in this category
+        let totalTrades = 0;
+        let totalInvestedUp = 0;
+        let totalTargetUp = 0;
+        let totalInvestedDown = 0;
+        let totalTargetDown = 0;
+        let hasAnyAssets = false;
+        let hasAnyPosition = false;
+        let hasAnyBuildState = false;
+        
+        for (const { id, market: m } of markets) {
+            const hasAssets = m.assetUp && m.assetDown;
+            if (hasAssets) hasAnyAssets = true;
+            
+            const hasPosition = positions.has(id);
+            if (hasPosition) hasAnyPosition = true;
+            
+            const buildState = buildingPositions.get(id);
+            if (buildState) {
+                hasAnyBuildState = true;
+                totalTrades += buildState.tradeCount;
+                totalInvestedUp += buildState.investedUp;
+                totalTargetUp += buildState.targetUp;
+                totalInvestedDown += buildState.investedDown;
+                totalTargetDown += buildState.targetDown;
+            } else if (hasPosition) {
+                const pos = positions.get(id)!;
+                totalTrades += 1; // Count as 1 trade for display
+            }
+        }
+        
+        // Calculate time until next market starts
+        // 15-minute markets start every 15 minutes (at :00, :15, :30, :45)
+        // 1-hour markets start every hour (at :00)
+        // Markets operate on ET/EST timezone
+        const is15MinMarket = baseCategory.includes('15');
+        
+        // Get current time in ET timezone
+        const etFormatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+        });
+        
+        const etParts = etFormatter.formatToParts(new Date(now));
+        const currentMinutes = parseInt(etParts.find(p => p.type === 'minute')?.value || '0', 10);
+        const currentSeconds = parseInt(etParts.find(p => p.type === 'second')?.value || '0', 10);
+        
+        let minutesUntilNextMarket = 0;
+        if (is15MinMarket) {
+            // Find next 15-minute mark (:00, :15, :30, :45)
+            const next15MinMark = Math.ceil(currentMinutes / 15) * 15;
+            let minutesToAdd = next15MinMark - currentMinutes;
+            // If we're exactly on a 15-minute mark, next one is in 15 minutes
+            if (minutesToAdd === 0) {
+                minutesToAdd = 15;
+            }
+            // Add seconds remaining in current minute
+            const totalSecondsUntilNext = (minutesToAdd * 60) - currentSeconds;
+            minutesUntilNextMarket = Math.ceil(totalSecondsUntilNext / 60);
         } else {
-            console.log(`   🎯 ${m.marketKey}: READY (${timeLeft}m left) UP:${m.priceUp?.toFixed(2)} DOWN:${m.priceDown?.toFixed(2)}`);
+            // 1-hour markets - find next hour mark
+            let minutesToNextHour = 60 - currentMinutes;
+            // If we're exactly on the hour, next one is in 60 minutes
+            if (minutesToNextHour === 0) {
+                minutesToNextHour = 60;
+            }
+            const totalSecondsUntilNextHour = (minutesToNextHour * 60) - currentSeconds;
+            minutesUntilNextMarket = Math.ceil(totalSecondsUntilNextHour / 60);
+        }
+        
+        const timeDisplay = `${minutesUntilNextMarket}m`;
+        
+        if (!hasAnyAssets) {
+            console.log(`   ⏳ ${baseCategory}: Waiting for assets (${markets.length} market${markets.length > 1 ? 's' : ''}) | Next market in ${timeDisplay}`);
+        } else if (hasAnyBuildState) {
+            // Show aggregated building progress
+            const upPct = totalTargetUp > 0 ? ((totalInvestedUp / totalTargetUp) * 100).toFixed(0) : '0';
+            const downPct = totalTargetDown > 0 ? ((totalInvestedDown / totalTargetDown) * 100).toFixed(0) : '0';
+            console.log(`   📈 ${baseCategory}: BUILDING ${totalTrades} trades | UP ${upPct}% DOWN ${downPct}% | Next market in ${timeDisplay} (${markets.length} market${markets.length > 1 ? 's' : ''})`);
+        } else if (hasAnyPosition) {
+            // Aggregate position info
+            let totalInv = 0;
+            let hasArb = false;
+            for (const { id } of markets) {
+                if (positions.has(id)) {
+                    const pos = positions.get(id)!;
+                    totalInv += pos.costUp + pos.costDown;
+                    if (pos.hasArbitragePosition) hasArb = true;
+                }
+            }
+            const status = hasArb ? '✅ARB' : '⏳WAIT';
+            console.log(`   📊 ${baseCategory}: ${status} $${totalInv.toFixed(2)} | Next market in ${timeDisplay} (${markets.length} market${markets.length > 1 ? 's' : ''})`);
+        } else {
+            // Show average prices if available
+            let avgPriceUp = 0;
+            let avgPriceDown = 0;
+            let priceCount = 0;
+            for (const { market: m } of markets) {
+                if (m.priceUp && m.priceDown) {
+                    avgPriceUp += m.priceUp;
+                    avgPriceDown += m.priceDown;
+                    priceCount++;
+                }
+            }
+            if (priceCount > 0) {
+                avgPriceUp /= priceCount;
+                avgPriceDown /= priceCount;
+            }
+            console.log(`   🎯 ${baseCategory}: READY | Next market in ${timeDisplay} | UP:${avgPriceUp > 0 ? avgPriceUp.toFixed(2) : 'N/A'} DOWN:${avgPriceDown > 0 ? avgPriceDown.toFixed(2) : 'N/A'} (${markets.length} market${markets.length > 1 ? 's' : ''})`);
         }
     }
 }
@@ -1327,6 +1650,9 @@ const paperTradeMonitor = async () => {
                 await cleanupExpiredMarketsAndPositions();
                 lastCleanupTime = now;
             }
+
+            // PROACTIVE DISCOVERY - Find markets directly without waiting for watcher
+            await proactivelyDiscoverMarkets();
 
             // Discover markets from watched traders (still useful for syncing state)
             await discoverMarketsFromWatchers();
