@@ -287,23 +287,35 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
     const btcSlugNext = `btc-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
     const ethSlugNext = `eth-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
 
-    // Generate hourly market slugs
-    const currentDate = new Date();
-    const currentHour = currentDate.getHours();
-    const nextHour = (currentHour + 1) % 24;
+    // Generate hourly market slugs - MUST use Eastern Time to match Polymarket slugs
+    // Get current time in ET timezone
+    const etFormatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: 'numeric',
+        hour12: true,
+    });
+    const etParts = etFormatter.formatToParts(new Date(now));
+    const etMonth = etParts.find(p => p.type === 'month')?.value?.toLowerCase() || 'january';
+    const etDay = parseInt(etParts.find(p => p.type === 'day')?.value || '1', 10);
+    const etHourRaw = parseInt(etParts.find(p => p.type === 'hour')?.value || '12', 10);
+    const etDayPeriod = etParts.find(p => p.type === 'dayPeriod')?.value?.toLowerCase() || 'am';
 
-    // Format: "december-26-8am-et"
-    const months = ['january', 'february', 'march', 'april', 'may', 'june',
-        'july', 'august', 'september', 'october', 'november', 'december'];
-    const month = months[currentDate.getMonth()];
-    const day = currentDate.getDate();
+    // Convert to 24-hour format for calculations
+    let currentHourET = etHourRaw;
+    if (etDayPeriod === 'pm' && etHourRaw !== 12) currentHourET += 12;
+    if (etDayPeriod === 'am' && etHourRaw === 12) currentHourET = 0;
+    const nextHourET = (currentHourET + 1) % 24;
 
+    // Format hour for slug: "8am", "12pm", etc.
     const formatHour = (h: number) => h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`;
 
-    const btcHourlyCurrent = `bitcoin-up-or-down-${month}-${day}-${formatHour(currentHour)}-et`;
-    const ethHourlyCurrent = `ethereum-up-or-down-${month}-${day}-${formatHour(currentHour)}-et`;
-    const btcHourlyNext = `bitcoin-up-or-down-${month}-${day}-${formatHour(nextHour)}-et`;
-    const ethHourlyNext = `ethereum-up-or-down-${month}-${day}-${formatHour(nextHour)}-et`;
+    const btcHourlyCurrent = `bitcoin-up-or-down-${etMonth}-${etDay}-${formatHour(currentHourET)}-et`;
+    const ethHourlyCurrent = `ethereum-up-or-down-${etMonth}-${etDay}-${formatHour(currentHourET)}-et`;
+    const btcHourlyNext = `bitcoin-up-or-down-${etMonth}-${etDay}-${formatHour(nextHourET)}-et`;
+    const ethHourlyNext = `ethereum-up-or-down-${etMonth}-${etDay}-${formatHour(nextHourET)}-et`;
 
     // All slugs to check
     const slugsToCheck = [
@@ -1334,7 +1346,7 @@ function displayStatus(): void {
 
     // Filter out expired markets and only show markets that correspond to current ET time
     // Only show the 4 active markets: current BTC 15m, current ETH 15m, current BTC 1h, current ETH 1h
-    const isMarketCurrentlyActive = (marketName: string, marketKey: string): boolean => {
+    const isMarketCurrentlyActive = (marketName: string, marketKey: string, marketSlug?: string): boolean => {
         // Get current ET time
         const etFormatter = new Intl.DateTimeFormat('en-US', {
             timeZone: 'America/New_York',
@@ -1345,49 +1357,83 @@ function displayStatus(): void {
         const etParts = etFormatter.formatToParts(new Date(now));
         const currentHour = parseInt(etParts.find(p => p.type === 'hour')?.value || '0', 10);
         const currentMinute = parseInt(etParts.find(p => p.type === 'minute')?.value || '0', 10);
-        
+
         // Check if it's a 15-minute market
         const is15Min = marketKey.includes('-15');
-        
+
         if (is15Min) {
             // For 15-minute markets: extract time window (e.g., "10:00AM-10:15AM ET")
             // Current market should be: floor(currentMinute/15)*15 to floor(currentMinute/15)*15 + 15
             const current15MinStart = Math.floor(currentMinute / 15) * 15;
-            
-            // Extract time window from market name - pattern: "HH:MMAM-PM - HH:MMAM-PM" or "HH:MM - HH:MM"
+
+            // First try slug format: btc-updown-15m-{unix_timestamp}
+            if (marketSlug) {
+                const slugTimestampMatch = marketSlug.match(/updown-15m-(\d+)/);
+                if (slugTimestampMatch) {
+                    const marketTimestamp = parseInt(slugTimestampMatch[1], 10) * 1000;
+                    const marketDate = new Date(marketTimestamp);
+                    // Convert to ET
+                    const marketETFormatter = new Intl.DateTimeFormat('en-US', {
+                        timeZone: 'America/New_York',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: false,
+                    });
+                    const marketETParts = marketETFormatter.formatToParts(marketDate);
+                    const marketETHour = parseInt(marketETParts.find(p => p.type === 'hour')?.value || '0', 10);
+                    const marketETMinute = parseInt(marketETParts.find(p => p.type === 'minute')?.value || '0', 10);
+                    const marketWindow = Math.floor(marketETMinute / 15) * 15;
+                    return marketETHour === currentHour && marketWindow === current15MinStart;
+                }
+            }
+
+            // Fallback: Extract time window from market name - pattern: "HH:MMAM-PM - HH:MMAM-PM" or "HH:MM - HH:MM"
             const timeWindowPattern = /(\d{1,2}):(\d{2})\s*([AP]M)?\s*[-–]\s*(\d{1,2}):(\d{2})\s*([AP]M)?/i;
             const match = marketName.match(timeWindowPattern);
             if (!match) return false;
-            
+
             let startHour = parseInt(match[1], 10);
             const startMinute = parseInt(match[2], 10);
             const startAMPM = match[3]?.toUpperCase();
-            
+
             // Handle AM/PM for start time
             if (startAMPM) {
                 if (startAMPM === 'PM' && startHour !== 12) startHour += 12;
                 if (startAMPM === 'AM' && startHour === 12) startHour = 0;
             }
-            
+
             // Check if market matches current 15-minute window
             // Market should start at currentHour:current15MinStart
             return startHour === currentHour && startMinute === current15MinStart;
         } else {
-            // For 1-hour markets: extract hour (e.g., "10AM" from "Bitcoin Up or Down - December 25, 10AM ET")
-            // Pattern: number followed by optional AM/PM, followed by ET (with optional text in between)
+            // For 1-hour markets: extract hour
+            // First try slug format: bitcoin-up-or-down-december-26-10am-et
+            if (marketSlug) {
+                // Pattern: {month}-{day}-{hour}am|pm-et (e.g., "december-26-10am-et")
+                const slugHourMatch = marketSlug.match(/(\d{1,2})(am|pm)-et$/i);
+                if (slugHourMatch) {
+                    let marketHour = parseInt(slugHourMatch[1], 10);
+                    const ampm = slugHourMatch[2].toUpperCase();
+                    if (ampm === 'PM' && marketHour !== 12) marketHour += 12;
+                    if (ampm === 'AM' && marketHour === 12) marketHour = 0;
+                    return marketHour === currentHour;
+                }
+            }
+
+            // Fallback: Pattern from market name - number followed by optional AM/PM, followed by ET
             const hourPattern = /(\d{1,2})\s*([AP]M)?\s*ET/i;
             const match = marketName.match(hourPattern);
             if (!match) return false;
-            
+
             let marketHour = parseInt(match[1], 10);
             const ampm = match[2]?.toUpperCase();
-            
+
             // Handle AM/PM
             if (ampm) {
                 if (ampm === 'PM' && marketHour !== 12) marketHour += 12;
                 if (ampm === 'AM' && marketHour === 12) marketHour = 0;
             }
-            
+
             // Check if market hour matches current hour
             return marketHour === currentHour;
         }
@@ -1397,9 +1443,9 @@ function displayStatus(): void {
         ([id, m]) => {
             // First filter: not expired
             if (m.endDate && m.endDate <= now) return false;
-            
+
             // Second filter: must correspond to current ET time
-            return isMarketCurrentlyActive(m.marketName, m.marketKey);
+            return isMarketCurrentlyActive(m.marketName, m.marketKey, m.marketSlug);
         }
     );
 
