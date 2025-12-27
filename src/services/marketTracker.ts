@@ -126,6 +126,8 @@ class MarketTracker {
                 'PnL Down ($)',
                 'Total PnL ($)',
                 'PnL Percent (%)',
+                'Average Cost Per Share UP ($)',
+                'Average Cost Per Share DOWN ($)',
                 'Trades Up',
                 'Trades Down',
                 'Outcome',
@@ -232,6 +234,10 @@ class MarketTracker {
         // Use cost basis (totalCostUp + totalCostDown) for accurate PnL percentage (same as display)
         const pnlPercent = totalCostBasis > 0 ? (totalPnl / totalCostBasis) * 100 : 0;
 
+        // Calculate average cost per share
+        const avgCostUp = market.sharesUp > 0 ? market.totalCostUp / market.sharesUp : 0;
+        const avgCostDown = market.sharesDown > 0 ? market.totalCostDown / market.sharesDown : 0;
+
         // Determine outcome
         let outcome = 'Unknown';
         if (finalPriceUp >= 0.99) {
@@ -279,6 +285,8 @@ class MarketTracker {
             pnlDown.toFixed(2),
             totalPnl.toFixed(2),
             pnlPercent.toFixed(2),
+            avgCostUp > 0 ? avgCostUp.toFixed(4) : '',
+            avgCostDown > 0 ? avgCostDown.toFixed(4) : '',
             market.tradesUp,
             market.tradesDown,
             outcome,
@@ -1006,6 +1014,10 @@ class MarketTracker {
         // Use cost basis (totalCostUp + totalCostDown) for accurate PnL percentage (same as display)
         const pnlPercent = totalCostBasis > 0 ? (totalPnl / totalCostBasis) * 100 : 0;
 
+        // Calculate average cost per share
+        const avgCostUp = market.sharesUp > 0 ? market.totalCostUp / market.sharesUp : 0;
+        const avgCostDown = market.sharesDown > 0 ? market.totalCostDown / market.sharesDown : 0;
+
         // Determine outcome
         let outcome = 'Unknown';
         if (finalPriceUp >= 0.99) {
@@ -1060,10 +1072,13 @@ class MarketTracker {
             pnlDown.toFixed(2),
             totalPnl.toFixed(2),
             pnlPercent.toFixed(2),
+            avgCostUp > 0 ? avgCostUp.toFixed(4) : '',
+            avgCostDown > 0 ? avgCostDown.toFixed(4) : '',
             market.tradesUp,
             market.tradesDown,
             outcome,
-            isSwitching ? 'Market Switch' : 'New Market Snapshot'
+            isSwitching ? 'Market Switch' : 'New Market Snapshot',
+            market.marketSlug || ''
         ].join(',');
 
         try {
@@ -1192,22 +1207,25 @@ class MarketTracker {
         let market = this.markets.get(marketKey);
 
         if (!market) {
-            // Calculate endDate - first try from activity, then calculate from slug
-            let endDate: number | undefined = activity.endDate ? activity.endDate * 1000 : undefined;
+            // Calculate endDate - ALWAYS calculate from slug for 15-min markets (API endDate is unreliable)
+            let endDate: number | undefined;
+            const slug = activity.slug || activity.eventSlug || '';
+            const is15MinMarket = slug.includes('updown-15m');
 
-            // FALLBACK: Calculate endDate from slug if not provided by API
-            // This is critical for the upcoming markets dashboard to show markets as READY
-            if (!endDate) {
-                const slug = activity.slug || activity.eventSlug || '';
-
-                // For 15-min markets: btc-updown-15m-{timestamp}
+            if (is15MinMarket) {
+                // For 15-min markets: ALWAYS calculate from slug timestamp (most reliable)
                 const timestamp15Match = slug.match(/updown-15m-(\d+)/);
                 if (timestamp15Match) {
                     const startTime = parseInt(timestamp15Match[1], 10) * 1000;
                     endDate = startTime + (15 * 60 * 1000); // 15 minutes from start
                 }
+            } else {
+                // For hourly markets: try API first, then calculate from slug
+                if (activity.endDate) {
+                    endDate = activity.endDate * 1000;
+                }
 
-                // For hourly markets: bitcoin-up-or-down-december-26-10am-et
+                // Fallback: calculate from slug for hourly markets
                 if (!endDate) {
                     const hourlyMatch = slug.match(/(\w+)-(\d+)-(\d{1,2})(am|pm)-et$/i);
                     if (hourlyMatch) {
@@ -1285,23 +1303,23 @@ class MarketTracker {
                 return;
             }
         } else {
-            // Update endDate and conditionId - ALWAYS update conditionId to handle market rotations
-            if (activity.endDate) {
-                market.endDate = activity.endDate * 1000; // Convert to milliseconds
-            } else if (!market.endDate) {
-                // FALLBACK: Calculate endDate from slug if not provided by API and market doesn't have one
-                const slug = activity.slug || activity.eventSlug || market.marketSlug || '';
+            // Update endDate - ALWAYS calculate from slug for 15-min markets (API endDate is unreliable)
+            const slugForEndDate = activity.slug || activity.eventSlug || market.marketSlug || '';
+            const is15MinMarket = slugForEndDate.includes('updown-15m');
 
-                // For 15-min markets: btc-updown-15m-{timestamp}
-                const timestamp15Match = slug.match(/updown-15m-(\d+)/);
+            if (is15MinMarket) {
+                // For 15-min markets: ALWAYS recalculate from slug (don't trust API)
+                const timestamp15Match = slugForEndDate.match(/updown-15m-(\d+)/);
                 if (timestamp15Match) {
                     const startTime = parseInt(timestamp15Match[1], 10) * 1000;
                     market.endDate = startTime + (15 * 60 * 1000); // 15 minutes from start
                 }
-
-                // For hourly markets: bitcoin-up-or-down-december-26-10am-et
-                if (!market.endDate) {
-                    const hourlyMatch = slug.match(/(\w+)-(\d+)-(\d{1,2})(am|pm)-et$/i);
+            } else if (!market.endDate) {
+                // For hourly markets: use API if available, otherwise calculate
+                if (activity.endDate) {
+                    market.endDate = activity.endDate * 1000;
+                } else {
+                    const hourlyMatch = slugForEndDate.match(/(\w+)-(\d+)-(\d{1,2})(am|pm)-et$/i);
                     if (hourlyMatch) {
                         const monthName = hourlyMatch[1];
                         const day = parseInt(hourlyMatch[2], 10);
@@ -1587,14 +1605,18 @@ class MarketTracker {
         if (this.markets.size === 0) {
             // Show empty state if we had markets before but now have none
             if (previousMarketCount > 0) {
-                // Use ANSI escape codes for reliable screen clearing
-                process.stdout.write('\x1b[2J\x1b[0f');
-                console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-                console.log(chalk.cyan.bold('  📊 MARKET TRACKING SUMMARY'));
-                console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-                console.log('');
-                console.log(chalk.gray('  No active markets to display'));
-                console.log('');
+                const emptyStateLines = [
+                    chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'),
+                    chalk.cyan.bold('  📊 MARKET TRACKING SUMMARY'),
+                    chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'),
+                    '',
+                    chalk.gray('  No active markets to display'),
+                    ''
+                ];
+                // Clear screen, scrollback buffer, and move cursor to top (prevents terminal history)
+                // \x1b[3J = clear screen and scrollback buffer, \x1b[H = move cursor to top-left
+                process.stdout.write('\x1b[3J\x1b[H');
+                process.stdout.write(emptyStateLines.join('\n') + '\n');
             }
             return; // Lock will be released in finally block
         }
@@ -1657,14 +1679,18 @@ class MarketTracker {
         if (activeMarkets.length === 0) {
             // Only show empty state if we had markets before
             if (marketsBeforeFilter > 0) {
-                // Use ANSI escape codes for reliable screen clearing
-                process.stdout.write('\x1b[2J\x1b[0f');
-                console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-                console.log(chalk.cyan.bold('  📊 MARKET TRACKING SUMMARY'));
-                console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-                console.log('');
-                console.log(chalk.gray('  No active markets to display'));
-                console.log('');
+                const emptyStateLines = [
+                    chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'),
+                    chalk.cyan.bold('  📊 MARKET TRACKING SUMMARY'),
+                    chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'),
+                    '',
+                    chalk.gray('  No active markets to display'),
+                    ''
+                ];
+                // Clear screen, scrollback buffer, and move cursor to top (prevents terminal history)
+                // \x1b[3J = clear screen and scrollback buffer, \x1b[H = move cursor to top-left
+                process.stdout.write('\x1b[3J\x1b[H');
+                process.stdout.write(emptyStateLines.join('\n') + '\n');
             }
             return; // Lock will be released in finally block
         }
@@ -2044,11 +2070,11 @@ class MarketTracker {
         outputLines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
         outputLines.push(''); // Empty line at end
 
-        // Clear screen and print everything at once
-        process.stdout.write('\x1b[2J\x1b[H');
-        for (const line of outputLines) {
-            console.log(line);
-        }
+        // Clear screen, scrollback buffer, and move cursor to top (prevents terminal history)
+        // \x1b[3J = clear screen and scrollback buffer, \x1b[H = move cursor to top-left
+        process.stdout.write('\x1b[3J\x1b[H');
+        const output = outputLines.join('\n');
+        process.stdout.write(output + '\n');
         } finally {
             // Release lock
             this.isDisplaying = false;
@@ -2361,29 +2387,54 @@ class MarketTracker {
             const conditionId = market.conditionId;
             const clobTokenIds = market.clobTokenIds || [];
 
-            // Parse end date
+            // Parse end date - ALWAYS calculate from slug for 15-min markets (API endDate is unreliable)
             let endDate: number | undefined;
-            if (market.endDate) {
-                endDate = typeof market.endDate === 'string'
-                    ? new Date(market.endDate).getTime()
-                    : market.endDate < 10000000000 ? market.endDate * 1000 : market.endDate;
-            } else if (event.endDate) {
-                endDate = typeof event.endDate === 'string'
-                    ? new Date(event.endDate).getTime()
-                    : event.endDate < 10000000000 ? event.endDate * 1000 : event.endDate;
-            }
 
-            // Fallback: calculate from slug
-            if (!endDate) {
-                if (is15Min) {
-                    const tsMatch = slug.match(/updown-15m-(\d+)/);
-                    if (tsMatch) {
-                        const startTime = parseInt(tsMatch[1], 10) * 1000;
-                        endDate = startTime + (15 * 60 * 1000);
+            if (is15Min) {
+                // For 15-min markets: ALWAYS calculate from slug timestamp (most reliable)
+                const tsMatch = slug.match(/updown-15m-(\d+)/);
+                if (tsMatch) {
+                    const startTime = parseInt(tsMatch[1], 10) * 1000;
+                    endDate = startTime + (15 * 60 * 1000); // 15 minutes after start
+                }
+            } else {
+                // For hourly markets: try API first, then calculate
+                if (market.endDate) {
+                    endDate = typeof market.endDate === 'string'
+                        ? new Date(market.endDate).getTime()
+                        : market.endDate < 10000000000 ? market.endDate * 1000 : market.endDate;
+                } else if (event.endDate) {
+                    endDate = typeof event.endDate === 'string'
+                        ? new Date(event.endDate).getTime()
+                        : event.endDate < 10000000000 ? event.endDate * 1000 : event.endDate;
+                }
+
+                // Fallback for hourly: calculate from slug
+                if (!endDate) {
+                    const hourlyMatch = slug.match(/(\w+)-(\d+)-(\d{1,2})(am|pm)-et$/i);
+                    if (hourlyMatch) {
+                        const monthName = hourlyMatch[1];
+                        const day = parseInt(hourlyMatch[2], 10);
+                        let hour = parseInt(hourlyMatch[3], 10);
+                        const ampmVal = hourlyMatch[4].toLowerCase();
+                        if (ampmVal === 'pm' && hour !== 12) hour += 12;
+                        if (ampmVal === 'am' && hour === 12) hour = 0;
+
+                        const months: {[key: string]: number} = {
+                            january: 0, february: 1, march: 2, april: 3, may: 4, june: 5,
+                            july: 6, august: 7, september: 8, october: 9, november: 10, december: 11
+                        };
+                        const monthNum = months[monthName.toLowerCase()] ?? 0;
+                        const year = new Date().getFullYear();
+
+                        // Create ET time and convert to UTC
+                        const etDateStr = `${year}-${String(monthNum + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:00:00`;
+                        const tempDate = new Date(etDateStr);
+                        const etOffset = new Date(tempDate.toLocaleString('en-US', { timeZone: 'America/New_York' })).getTime() -
+                                         new Date(tempDate.toLocaleString('en-US', { timeZone: 'UTC' })).getTime();
+                        const startTimeUTC = tempDate.getTime() - etOffset;
+                        endDate = startTimeUTC + (60 * 60 * 1000); // 1 hour after start
                     }
-                } else {
-                    // Hourly - 1 hour from now as fallback
-                    endDate = now + (60 * 60 * 1000);
                 }
             }
 

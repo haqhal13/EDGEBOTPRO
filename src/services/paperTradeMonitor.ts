@@ -2340,8 +2340,10 @@ function displayStatus(): void {
     lines.push(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
     lines.push('');
 
-    // Output everything at once
-    console.log(lines.join('\n'));
+    // Clear screen, scrollback buffer, and move cursor to top (prevents terminal history)
+    // \x1b[3J = clear screen and scrollback buffer, \x1b[H = move cursor to top-left
+    process.stdout.write('\x1b[3J\x1b[H');
+    process.stdout.write(lines.join('\n') + '\n');
 }
 
 /**
@@ -2527,10 +2529,8 @@ const paperTradeMonitor = async () => {
             // Settle expired positions
             await settlePositions();
 
-            // Display status periodically - use single screen refresh
+            // Display status periodically - displayStatus() handles screen clearing internally
             if (now - lastDisplayTime >= DISPLAY_INTERVAL_MS) {
-                // Clear screen and display everything at once
-                process.stdout.write('\x1b[2J\x1b[0f');
                 displayStatus();
                 lastDisplayTime = now;
             }

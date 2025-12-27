@@ -50,9 +50,21 @@ function getTimestampBreakdown(timestamp: number): {
     };
 }
 
+/**
+ * Track average cost per share for UP and DOWN positions per market
+ */
+interface MarketAverageCosts {
+    totalCostUp: number;
+    sharesUp: number;
+    totalCostDown: number;
+    sharesDown: number;
+}
+
 class TradeLogger {
     private csvFilePath: string;
     private loggedTrades: Set<string> = new Set(); // Track trades already logged
+    // Track running weighted average costs per market (by conditionId)
+    private marketAverageCosts: Map<string, MarketAverageCosts> = new Map();
 
     constructor() {
         // Initialize CSV file path - use paper folder if in PAPER mode, otherwise watcher folder
@@ -108,6 +120,8 @@ class TradeLogger {
                 'Price Difference UP',
                 'Price Difference DOWN',
                 'Entry Type',
+                'Average Cost Per Share UP ($)',
+                'Average Cost Per Share DOWN ($)',
                 // Paper-specific columns (kept for 1:1 CSV format)
                 'Skew Magnitude',
                 'Dominant Side',
@@ -313,6 +327,34 @@ class TradeLogger {
             const priceDifferenceUp = isUp ? (tradePrice - prices.priceUp) : 0;
             const priceDifferenceDown = !isUp ? (tradePrice - prices.priceDown) : 0;
             
+            // Update and get average costs for this market
+            const conditionId = activity.conditionId || '';
+            let avgCosts = this.marketAverageCosts.get(conditionId);
+            if (!avgCosts) {
+                avgCosts = {
+                    totalCostUp: 0,
+                    sharesUp: 0,
+                    totalCostDown: 0,
+                    sharesDown: 0,
+                };
+                this.marketAverageCosts.set(conditionId, avgCosts);
+            }
+            
+            // Update running weighted average based on trade
+            if (isUp) {
+                // For UP trades: add to UP position
+                avgCosts.totalCostUp += usdcSize;
+                avgCosts.sharesUp += size;
+            } else {
+                // For DOWN trades: add to DOWN position
+                avgCosts.totalCostDown += usdcSize;
+                avgCosts.sharesDown += size;
+            }
+            
+            // Calculate current average costs
+            const avgCostUp = avgCosts.sharesUp > 0 ? avgCosts.totalCostUp / avgCosts.sharesUp : 0;
+            const avgCostDown = avgCosts.sharesDown > 0 ? avgCosts.totalCostDown / avgCosts.sharesDown : 0;
+            
             const row = [
                 timestamp,
                 date,
@@ -342,6 +384,8 @@ class TradeLogger {
                 priceDifferenceUp.toFixed(4),
                 priceDifferenceDown.toFixed(4),
                 traderAddress === 'PAPER' ? 'PAPER' : 'WATCH', // Entry Type
+                avgCostUp > 0 ? avgCostUp.toFixed(4) : '', // Average Cost Per Share UP
+                avgCostDown > 0 ? avgCostDown.toFixed(4) : '', // Average Cost Per Share DOWN
                 '', // Skew Magnitude (N/A for watcher bot)
                 '', // Dominant Side (N/A for watcher bot)
                 '', // Target Allocation (N/A for watcher bot)

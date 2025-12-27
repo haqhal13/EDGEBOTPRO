@@ -247,13 +247,19 @@ class PriceStreamLogger {
         const hasWatchTrades = pending.watchTrades.length > 0;
         const hasPaperTrades = pending.paperTrades.length > 0;
 
-        // Aggregate notes: show count and summary
+        // Aggregate notes: show clear trade entries with WATCH/PAPER prefix
         const allNotes: string[] = [];
         if (hasWatchTrades) {
-            allNotes.push(`Watch(${pending.watchTrades.length}): ${pending.watchTrades.slice(-3).join('; ')}`);
+            // Show all watch trades clearly labeled
+            pending.watchTrades.forEach(trade => {
+                allNotes.push(`WATCH: ${trade}`);
+            });
         }
         if (hasPaperTrades) {
-            allNotes.push(`Paper(${pending.paperTrades.length}): ${pending.paperTrades.slice(-3).join('; ')}`);
+            // Show all paper trades clearly labeled
+            pending.paperTrades.forEach(trade => {
+                allNotes.push(`PAPER: ${trade}`);
+            });
         }
         const notesField = allNotes.length > 0
             ? `"${allNotes.join(' | ').replace(/"/g, '""')}"`
