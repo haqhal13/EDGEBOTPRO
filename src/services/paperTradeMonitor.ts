@@ -2097,16 +2097,32 @@ function displayStatus(): void {
             const tradesUp = buildState ? buildState.tradeCountUp : 0;
             const tradesDown = buildState ? buildState.tradeCountDown : 0;
 
-            // Get live prices
+            // Get live prices with validation (same as watcher mode)
             const liveUp = m.priceUp || 0;
             const liveDown = m.priceDown || 0;
-            const hasValidPrices = liveUp > 0 && liveDown > 0;
 
-            // Calculate PnL
-            const currentValueUp = sharesUp * liveUp;
-            const currentValueDown = sharesDown * liveDown;
-            const pnlUp = currentValueUp - investedUp;
-            const pnlDown = currentValueDown - investedDown;
+            // Validate prices are within valid range (0 to 1) - same as watcher
+            const hasValidPriceUp = liveUp > 0 && liveUp <= 1;
+            const hasValidPriceDown = liveDown > 0 && liveDown <= 1;
+            const hasValidPrices = hasValidPriceUp && hasValidPriceDown;
+
+            // Calculate PnL (same logic as watcher mode - marketTracker.ts)
+            // PnL = (shares × currentPrice) - costBasis
+            let currentValueUp = 0;
+            let currentValueDown = 0;
+            let pnlUp = 0;
+            let pnlDown = 0;
+
+            if (hasValidPriceUp && sharesUp > 0) {
+                currentValueUp = sharesUp * liveUp;
+                pnlUp = currentValueUp - investedUp;
+            }
+
+            if (hasValidPriceDown && sharesDown > 0) {
+                currentValueDown = sharesDown * liveDown;
+                pnlDown = currentValueDown - investedDown;
+            }
+
             const totalPnl = pnlUp + pnlDown;
             const totalCurrentValue = currentValueUp + currentValueDown;
 
