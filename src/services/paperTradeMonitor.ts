@@ -47,38 +47,55 @@ const PAPER_BTC_MAX_PER_MARKET = parseFloat(process.env.PAPER_BTC_MAX_PER_MARKET
 const PAPER_ETH_MAX_PER_MARKET = parseFloat(process.env.PAPER_ETH_MAX_PER_MARKET || '1800');
 
 // =============================================================================
-// THE SECRET SAUCE: WATCHER SIZES BY SHARES, NOT VALUE!
-// Dec 26 DATA: Paper 43.8% trades under $2 vs Watcher 31.1%
-// Paper has too many tiny trades - reduce weights for 1,2 shares
-// Top share amounts: 5(10.2%), 16(9.9%), 1(8.3%), 2(7.4%), 28(7.0%)
+// THE SECRET SAUCE: EXACT WATCHER SHARE DISTRIBUTIONS (Dec 26 6200 trades)
+// KEY INSIGHT: BTC and ETH have DIFFERENT share distributions!
+// BTC 15m: 28(12.8%), 5(11.7%), 1(10.4%), 3(6.3%), 2(6.2%)
+// ETH 15m: 16(45.6%!), 15(9.5%), 14(5.7%), 5(5.5%), 2(5.1%)
 // =============================================================================
-const TARGET_SHARE_AMOUNTS = [5, 16, 28, 1, 2, 14, 10, 3, 22, 15, 6, 4, 8, 12, 7];
-// ADJUSTED: Boost 5, 16, 28 weights; reduce 1, 2 weights to cut tiny trades
-const SHARE_WEIGHTS = [12.0, 11.0, 10.0, 5.0, 4.5, 5.5, 5.0, 4.0, 4.0, 4.0, 3.5, 3.5, 3.0, 3.0, 3.0];
-// Minimum shares for a trade (watcher does 1-share trades too)
+// BTC 15-min share distribution (4141 trades analyzed)
+const BTC_15M_SHARE_AMOUNTS = [28, 5, 1, 3, 2, 20, 6, 4, 10, 27, 26, 7, 8, 15, 25];
+const BTC_15M_SHARE_WEIGHTS = [12.8, 11.7, 10.4, 6.3, 6.2, 3.9, 3.8, 3.5, 3.3, 2.8, 2.6, 2.5, 2.4, 2.4, 2.3];
+
+// ETH 15-min share distribution (1238 trades analyzed) - VERY different!
+const ETH_15M_SHARE_AMOUNTS = [16, 15, 14, 5, 2, 13, 11, 12, 3, 10, 1, 6, 8, 4, 9];
+const ETH_15M_SHARE_WEIGHTS = [45.6, 9.5, 5.7, 5.5, 5.1, 4.9, 3.6, 3.4, 3.2, 2.4, 2.3, 2.1, 2.0, 1.7, 1.5];
+
+// 1-hour market share distribution (different from 15m)
+const BTC_1H_SHARE_AMOUNTS = [22, 2, 5, 6, 3, 4, 1, 10, 20, 8];
+const BTC_1H_SHARE_WEIGHTS = [19.0, 18.6, 10.5, 9.5, 8.9, 7.6, 5.8, 3.7, 1.9, 1.6];
+
+// Legacy fallback (used if market key doesn't match)
+const TARGET_SHARE_AMOUNTS = BTC_15M_SHARE_AMOUNTS;
+const SHARE_WEIGHTS = BTC_15M_SHARE_WEIGHTS;
 const MIN_SHARES = 0.5;
 
 // =============================================================================
-// TIMING PATTERNS (from Dec 26 analysis)
-// Watcher: 78.1% of gaps are 2-5s! Paper was only 42.9%
-// CRITICAL FIX: Increase fast trade percentage to match watcher
+// TIMING PATTERNS (from Dec 26 6200 trades analysis)
+// EXACT gap distribution: 76.6% at 2-3s, 13.8% at 4-5s, 6.8% at 5-10s
+// Average gap: 3.09s, Median gap: 2.00s
+// Trade rate: 60-80 trades/minute during active periods
 // =============================================================================
-const BATCH_INTERVAL_MS = 2000;
-const BASE_GAP_MS = 2500;
-const POLL_INTERVAL_MS = 300; // Reduced from 1000ms for faster price updates
+const BATCH_INTERVAL_MS = 2000; // Base batch interval
+const BASE_GAP_MS = 2500; // Base gap between trades
+const POLL_INTERVAL_MS = 200; // Fast price updates
 
-// Direction balance: 50.7% UP by $, 49.9% UP by count
-const UP_BIAS = 0.507; // Match exact watcher ratio by $
-const DIRECTION_VARIANCE = 0.02;
+// Direction balance: EXACTLY 50/50 - no momentum bias needed!
+// Analysis shows 49.1% UP, 50.9% DOWN - essentially 50/50
+const UP_BIAS = 0.50; // True 50/50 split
+const DIRECTION_VARIANCE = 0.01; // Very small variance
+
+// BTC vs ETH allocation: 75% BTC, 25% ETH (3:1 ratio from 6200 trades)
+const BTC_ALLOCATION_RATIO = 0.75;
 
 // =============================================================================
-// DYNAMIC REBALANCING - THE REAL SECRET SAUCE
-// Watcher chases momentum: when price moves up, he shifts allocation to UP
-// This is DYNAMIC, not static - he adjusts minute-by-minute based on live prices
+// MOMENTUM CHASING - ANALYSIS SHOWS NO MOMENTUM BIAS!
+// Dec 26 data: When priceUp 0.30-0.60, watcher buys 49-51% UP consistently
+// This means NO momentum chasing - just pure 50/50 hedging strategy
+// Keeping these params but setting to 0 to disable
 // =============================================================================
-const MOMENTUM_CHASE_FACTOR = 0.6; // How aggressively to chase momentum (0-1)
-const PRICE_THRESHOLD_FOR_CHASE = 0.10; // Min price move to trigger chase (10 cents)
-const REBALANCE_CHECK_INTERVAL_MS = 10000; // Check rebalance every 10 seconds
+const MOMENTUM_CHASE_FACTOR = 0.0; // DISABLED - no momentum chasing
+const PRICE_THRESHOLD_FOR_CHASE = 0.10; // Not used when factor is 0
+const REBALANCE_CHECK_INTERVAL_MS = 10000; // Not used when factor is 0
 
 // Arbitrage strategy parameters
 const EXPIRATION_WINDOW_MS = 2 * 60 * 1000;
@@ -329,19 +346,54 @@ async function fetchMarketAssets(conditionId: string, slug?: string): Promise<{ 
  * - BTC Hourly: bitcoin-up-or-down-{month}-{day}-{hour}am-et
  * - ETH Hourly: ethereum-up-or-down-{month}-{day}-{hour}am-et
  */
+// Track the last window we processed to detect window changes
+let lastProcessedWindow = 0;
+let lastHourProcessed = -1;
+
 async function proactivelyDiscoverMarkets(): Promise<void> {
     const now = Date.now();
 
-    // Calculate 15-minute boundaries (markets start at :00, :15, :30, :45)
+    // Calculate 15-minute boundaries IN EASTERN TIME (markets start at :00, :15, :30, :45 ET)
+    // CRITICAL: Polymarket uses ET time for market windows, not UTC!
     const FIFTEEN_MIN_MS = 15 * 60 * 1000;
-    const currentWindowStart = Math.floor(now / FIFTEEN_MIN_MS) * FIFTEEN_MIN_MS;
+
+    // Get current ET time components
+    const etTimeFormatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    });
+    const etTimeParts = etTimeFormatter.formatToParts(new Date(now));
+    const currentETHour24 = parseInt(etTimeParts.find(p => p.type === 'hour')?.value || '0', 10);
+    const currentETMinute = parseInt(etTimeParts.find(p => p.type === 'minute')?.value || '0', 10);
+
+    // Calculate current 15-min window start minute (0, 15, 30, or 45)
+    const windowStartMinute = Math.floor(currentETMinute / 15) * 15;
+
+    // Build the ET window start time
+    // Get today's date in ET
+    const etDateFormatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    });
+    const etDateParts = etDateFormatter.formatToParts(new Date(now));
+    const etYear = parseInt(etDateParts.find(p => p.type === 'year')?.value || '2025', 10);
+    const etMonthNum = parseInt(etDateParts.find(p => p.type === 'month')?.value || '1', 10);
+    const etDayNum = parseInt(etDateParts.find(p => p.type === 'day')?.value || '1', 10);
+
+    // Create the window start as a date in ET, then convert to UTC timestamp
+    const windowStartETStr = `${etYear}-${String(etMonthNum).padStart(2, '0')}-${String(etDayNum).padStart(2, '0')}T${String(currentETHour24).padStart(2, '0')}:${String(windowStartMinute).padStart(2, '0')}:00`;
+    // Parse as local time first, then adjust for ET offset
+    const tempWindowDate = new Date(windowStartETStr);
+    const etOffset = new Date(tempWindowDate.toLocaleString('en-US', { timeZone: 'America/New_York' })).getTime() -
+                     new Date(tempWindowDate.toLocaleString('en-US', { timeZone: 'UTC' })).getTime();
+    const currentWindowStart = tempWindowDate.getTime() - etOffset;
     const nextWindowStart = currentWindowStart + FIFTEEN_MIN_MS;
 
-    // Generate 15-minute market slugs (current and next window)
-    const btcSlugCurrent = `btc-updown-15m-${Math.floor(currentWindowStart / 1000)}`;
-    const ethSlugCurrent = `eth-updown-15m-${Math.floor(currentWindowStart / 1000)}`;
-    const btcSlugNext = `btc-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
-    const ethSlugNext = `eth-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
+    debugLog(`15m window calc: ETHour=${currentETHour24} ETMin=${currentETMinute} windowMin=${windowStartMinute} -> ${new Date(currentWindowStart).toISOString()}`);
 
     // Generate hourly market slugs - MUST use Eastern Time to match Polymarket slugs
     // Get current time in ET timezone
@@ -365,13 +417,116 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
     if (etDayPeriod === 'am' && etHourRaw === 12) currentHourET = 0;
     const nextHourET = (currentHourET + 1) % 24;
 
-    // Format hour for slug: "8am", "12pm", etc.
-    const formatHour = (h: number) => h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`;
+    // CRITICAL: Clear the fetched slugs cache when a new window OR hour starts
+    // This ensures we immediately discover new markets
+    const windowChanged = currentWindowStart !== lastProcessedWindow;
+    const hourChanged = currentHourET !== lastHourProcessed;
 
-    const btcHourlyCurrent = `bitcoin-up-or-down-${etMonth}-${etDay}-${formatHour(currentHourET)}-et`;
-    const ethHourlyCurrent = `ethereum-up-or-down-${etMonth}-${etDay}-${formatHour(currentHourET)}-et`;
-    const btcHourlyNext = `bitcoin-up-or-down-${etMonth}-${etDay}-${formatHour(nextHourET)}-et`;
-    const ethHourlyNext = `ethereum-up-or-down-${etMonth}-${etDay}-${formatHour(nextHourET)}-et`;
+    if (windowChanged || hourChanged) {
+        fetchedSlugs.clear();
+        // Also clear any expired markets from discoveredMarkets to force re-fetch
+        for (const [id, market] of discoveredMarkets.entries()) {
+            if (market.endDate && market.endDate <= now) {
+                discoveredMarkets.delete(id);
+                debugLog(`🗑️ Removed expired market: ${market.marketKey}`);
+            }
+        }
+        lastProcessedWindow = currentWindowStart;
+        lastHourProcessed = currentHourET;
+        Logger.info(`🔄 New ${windowChanged ? '15-min window' : 'hour'} detected! Scanning for new markets...`);
+    }
+
+    // PRE-FETCH: Check how much time is left in current window
+    // If less than 60 seconds left, aggressively fetch next markets
+    const timeToNextWindow = nextWindowStart - now;
+    const PRE_FETCH_THRESHOLD = 60 * 1000; // 60 seconds before window ends
+    const shouldPreFetch = timeToNextWindow <= PRE_FETCH_THRESHOLD && timeToNextWindow > 0;
+
+    if (shouldPreFetch) {
+        // Force re-fetch of NEXT window markets so they're ready when current expires
+        const nextBtcSlug = `btc-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
+        const nextEthSlug = `eth-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
+
+        // Check if we already have next markets
+        const haveNextBTC = Array.from(discoveredMarkets.values()).some(m =>
+            m.marketSlug === nextBtcSlug && m.endDate && m.endDate > now
+        );
+        const haveNextETH = Array.from(discoveredMarkets.values()).some(m =>
+            m.marketSlug === nextEthSlug && m.endDate && m.endDate > now
+        );
+
+        if (!haveNextBTC) {
+            fetchedSlugs.delete(nextBtcSlug);
+            debugLog(`⏰ Pre-fetching next BTC 15m (${Math.floor(timeToNextWindow/1000)}s until switch)`);
+        }
+        if (!haveNextETH) {
+            fetchedSlugs.delete(nextEthSlug);
+            debugLog(`⏰ Pre-fetching next ETH 15m (${Math.floor(timeToNextWindow/1000)}s until switch)`);
+        }
+    }
+
+    // Same for hourly markets - pre-fetch when less than 60s left in hour
+    const nextHourStart = new Date(now);
+    nextHourStart.setMinutes(0, 0, 0);
+    nextHourStart.setHours(nextHourStart.getHours() + 1);
+    // Adjust for ET timezone
+    const etNow = new Date(new Date(now).toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const currentMinuteET = etNow.getMinutes();
+    const timeToNextHour = (60 - currentMinuteET) * 60 * 1000 - (etNow.getSeconds() * 1000);
+
+    if (timeToNextHour <= PRE_FETCH_THRESHOLD && timeToNextHour > 0) {
+        debugLog(`⏰ Pre-fetching next hourly markets (${Math.floor(timeToNextHour/1000)}s until hour change)`);
+    }
+
+    // FORCE: Check if we're missing any active 15-min markets and force re-fetch
+    const have15mBTC = Array.from(discoveredMarkets.values()).some(m =>
+        m.marketKey === 'BTC-UpDown-15' && m.endDate && m.endDate > now
+    );
+    const have15mETH = Array.from(discoveredMarkets.values()).some(m =>
+        m.marketKey === 'ETH-UpDown-15' && m.endDate && m.endDate > now
+    );
+
+    // Log what's missing and force retry
+    if (!have15mBTC) {
+        debugLog(`⚠️ Missing BTC-15m market - forcing re-fetch`);
+        fetchedSlugs.delete(`btc-updown-15m-${Math.floor(currentWindowStart / 1000)}`);
+    }
+    if (!have15mETH) {
+        debugLog(`⚠️ Missing ETH-15m market - forcing re-fetch`);
+        fetchedSlugs.delete(`eth-updown-15m-${Math.floor(currentWindowStart / 1000)}`);
+    }
+
+    // Same for hourly markets
+    const have1hBTC = Array.from(discoveredMarkets.values()).some(m =>
+        m.marketKey.startsWith('BTC-UpDown-1h') && m.endDate && m.endDate > now
+    );
+    const have1hETH = Array.from(discoveredMarkets.values()).some(m =>
+        m.marketKey.startsWith('ETH-UpDown-1h') && m.endDate && m.endDate > now
+    );
+
+    // Format hour for slug (needed early for force re-fetch)
+    const formatHourForSlug = (h: number) => h === 0 ? '12am' : h < 12 ? `${h}am` : h === 12 ? '12pm' : `${h - 12}pm`;
+
+    if (!have1hBTC) {
+        debugLog(`⚠️ Missing BTC-1h market - forcing re-fetch`);
+        fetchedSlugs.delete(`bitcoin-up-or-down-${etMonth}-${etDay}-${formatHourForSlug(currentHourET)}-et`);
+    }
+    if (!have1hETH) {
+        debugLog(`⚠️ Missing ETH-1h market - forcing re-fetch`);
+        fetchedSlugs.delete(`ethereum-up-or-down-${etMonth}-${etDay}-${formatHourForSlug(currentHourET)}-et`);
+    }
+
+    // Generate 15-minute market slugs (current and next window)
+    const btcSlugCurrent = `btc-updown-15m-${Math.floor(currentWindowStart / 1000)}`;
+    const ethSlugCurrent = `eth-updown-15m-${Math.floor(currentWindowStart / 1000)}`;
+    const btcSlugNext = `btc-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
+    const ethSlugNext = `eth-updown-15m-${Math.floor(nextWindowStart / 1000)}`;
+
+    // Use the formatHourForSlug function defined above
+    const btcHourlyCurrent = `bitcoin-up-or-down-${etMonth}-${etDay}-${formatHourForSlug(currentHourET)}-et`;
+    const ethHourlyCurrent = `ethereum-up-or-down-${etMonth}-${etDay}-${formatHourForSlug(currentHourET)}-et`;
+    const btcHourlyNext = `bitcoin-up-or-down-${etMonth}-${etDay}-${formatHourForSlug(nextHourET)}-et`;
+    const ethHourlyNext = `ethereum-up-or-down-${etMonth}-${etDay}-${formatHourForSlug(nextHourET)}-et`;
 
     // All slugs to check
     const slugsToCheck = [
@@ -379,23 +534,41 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
         btcHourlyCurrent, ethHourlyCurrent, btcHourlyNext, ethHourlyNext
     ];
 
+    // Log what we're looking for - use Logger.info so it's visible
+    Logger.info(`🔍 Checking: ${btcSlugCurrent.split('-').pop()}, ${ethSlugCurrent.split('-').pop()} | cache: ${fetchedSlugs.size} | discovered: ${discoveredMarkets.size}`);
+
     // Fetch markets in parallel for speed
     const fetchPromises = slugsToCheck.map(async (slug) => {
-        // Skip if already fetched or already discovered
-        if (fetchedSlugs.has(slug)) return;
-
-        // Check if we already have this market by slug
-        for (const [_, market] of discoveredMarkets.entries()) {
-            if (market.marketSlug === slug) return;
+        // Skip if already fetched in this session
+        if (fetchedSlugs.has(slug)) {
+            return;
         }
 
-        fetchedSlugs.add(slug);
+        // Check if we already have this market by slug
+        let alreadyHave = false;
+        for (const [_, market] of discoveredMarkets.entries()) {
+            if (market.marketSlug === slug) {
+                alreadyHave = true;
+                break;
+            }
+        }
+        if (alreadyHave) {
+            return;
+        }
 
+        Logger.info(`   📡 Fetching: ${slug}`);
+
+        // DON'T mark as fetched until AFTER success - allows retry on failure
         try {
             const url = `https://gamma-api.polymarket.com/events?slug=${slug}`;
-            const data = await fetchData(url).catch(() => null);
+            const data = await fetchData(url).catch((e) => {
+                Logger.error(`   ❌ Fetch failed for ${slug}: ${e}`);
+                return null;
+            });
 
             if (data && Array.isArray(data) && data.length > 0) {
+                // Mark as fetched ONLY on success
+                fetchedSlugs.add(slug);
                 const event = data[0];
 
                 // Extract market data from nested structure
@@ -404,12 +577,34 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
 
                 const market = markets[0];
                 const conditionId = market.conditionId || market.condition_id;
-                const clobTokenIds = market.clobTokenIds || [];
+
+                // Parse clobTokenIds - API returns it as JSON string, not array
+                let clobTokenIds: string[] = [];
+                if (typeof market.clobTokenIds === 'string') {
+                    try {
+                        clobTokenIds = JSON.parse(market.clobTokenIds);
+                    } catch (e) {
+                        debugLog(`Failed to parse clobTokenIds for ${slug}: ${e}`);
+                        return;
+                    }
+                } else if (Array.isArray(market.clobTokenIds)) {
+                    clobTokenIds = market.clobTokenIds;
+                }
 
                 if (!conditionId || clobTokenIds.length < 2) return;
 
                 // Determine which token is UP and which is DOWN
-                const outcomes = market.outcomes || ['Up', 'Down'];
+                // Parse outcomes - API returns it as JSON string, not array
+                let outcomes: string[] = ['Up', 'Down'];
+                if (typeof market.outcomes === 'string') {
+                    try {
+                        outcomes = JSON.parse(market.outcomes);
+                    } catch (e) {
+                        // Use default
+                    }
+                } else if (Array.isArray(market.outcomes)) {
+                    outcomes = market.outcomes;
+                }
                 const isFirstUp = outcomes[0]?.toLowerCase().includes('up');
                 const assetUp = isFirstUp ? clobTokenIds[0] : clobTokenIds[1];
                 const assetDown = isFirstUp ? clobTokenIds[1] : clobTokenIds[0];
@@ -510,10 +705,8 @@ async function proactivelyDiscoverMarkets(): Promise<void> {
     // Wait for all fetches to complete (parallel for speed)
     await Promise.all(fetchPromises);
 
-    // Clear old slugs from cache (keep only last hour's worth)
-    if (fetchedSlugs.size > 100) {
-        fetchedSlugs.clear();
-    }
+    // Note: Cache is now cleared at the start of each new 15-minute window
+    // This ensures instant discovery of new markets
 }
 
 /**
@@ -525,7 +718,9 @@ function getMarketKey(title: string): string {
 
     const isBTC = lowerTitle.includes('bitcoin') || lowerTitle.includes('btc');
     const isETH = lowerTitle.includes('ethereum') || lowerTitle.includes('eth');
-    const is15Min = lowerTitle.includes('15') || /\d{1,2}:\d{2}\s*[-–]\s*\d{1,2}:\d{2}/i.test(title);
+    // 15-min markets have time range like "7:45PM-8:00PM" or "7:00AM-7:15AM"
+    // The regex matches: HH:MM optionally followed by AM/PM, then dash, then HH:MM
+    const is15Min = /\d{1,2}:\d{2}\s*(?:[AP]M)?\s*[-–]\s*\d{1,2}:\d{2}/i.test(title);
     // Handle both title format (with spaces: "5AM ET") and slug format (with hyphens: "5am-et")
     const isHourly = (/\d{1,2}\s*(?:am|pm)\s*et/i.test(title) || /\d{1,2}(?:am|pm)-et/i.test(title)) && !is15Min;
 
@@ -1006,23 +1201,50 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
     }
 
     // ==========================================================================
-    // THE SECRET SAUCE: SIZE BY SHARES, NOT VALUE!
-    // Watcher selects from specific share amounts: 5, 28, 16, 2, 1, 14, 10...
-    // Value = shares × price (so value naturally varies with price)
+    // THE SECRET SAUCE: MARKET-SPECIFIC SHARE DISTRIBUTIONS!
+    // BTC and ETH have VERY different share patterns:
+    // - BTC 15m: 28(12.8%), 5(11.7%), 1(10.4%) - larger trades
+    // - ETH 15m: 16(45.6%!), 15(9.5%), 14(5.7%) - focused on 14-16 shares
+    // - 1h markets: 22(19%), 2(18.6%) - polarized
     // ==========================================================================
     function selectTargetShares(): number {
-        // Weighted random selection from watcher's most common share amounts
-        const totalWeight = SHARE_WEIGHTS.reduce((a, b) => a + b, 0);
+        // Select distribution based on market type
+        let shareAmounts: number[];
+        let shareWeights: number[];
+
+        const isBTC = market.marketKey.includes('BTC');
+        const is15m = market.marketKey.includes('-15');
+        const is1h = market.marketKey.includes('-1h');
+
+        if (isBTC && is15m) {
+            shareAmounts = BTC_15M_SHARE_AMOUNTS;
+            shareWeights = BTC_15M_SHARE_WEIGHTS;
+        } else if (!isBTC && is15m) {
+            // ETH 15-min - very different distribution!
+            shareAmounts = ETH_15M_SHARE_AMOUNTS;
+            shareWeights = ETH_15M_SHARE_WEIGHTS;
+        } else if (is1h) {
+            // 1-hour markets use BTC 1h distribution for both
+            shareAmounts = BTC_1H_SHARE_AMOUNTS;
+            shareWeights = BTC_1H_SHARE_WEIGHTS;
+        } else {
+            // Fallback to BTC 15m
+            shareAmounts = BTC_15M_SHARE_AMOUNTS;
+            shareWeights = BTC_15M_SHARE_WEIGHTS;
+        }
+
+        // Weighted random selection
+        const totalWeight = shareWeights.reduce((a, b) => a + b, 0);
         let rand = Math.random() * totalWeight;
-        for (let i = 0; i < TARGET_SHARE_AMOUNTS.length; i++) {
-            rand -= SHARE_WEIGHTS[i];
+        for (let i = 0; i < shareAmounts.length; i++) {
+            rand -= shareWeights[i];
             if (rand <= 0) {
-                // Add small variance (±10%) to avoid exact matches
-                const variance = 0.9 + Math.random() * 0.2;
-                return TARGET_SHARE_AMOUNTS[i] * variance;
+                // Add small variance (±5%) to avoid exact matches
+                const variance = 0.95 + Math.random() * 0.1;
+                return shareAmounts[i] * variance;
             }
         }
-        return 12; // Default fallback (median)
+        return 12; // Default fallback
     }
 
     // ==========================================================================
@@ -1212,19 +1434,21 @@ async function buildPositionIncrementally(market: typeof discoveredMarkets exten
         debugLog(`buildPosition: ${market.marketKey} DOWN trade #${buildState.tradeCount}: ${sharesDown.toFixed(1)} shares @ ${market.priceDown.toFixed(4)} = $${tradeDown.toFixed(2)}`);
     }
 
-    // Set next trade time based on watcher gap distribution
-    // Dec 26 DATA: Watcher 78.1% are 2-5s, Paper was only 42.9%
-    // CRITICAL FIX: Increase fast trade percentage to 80%
+    // Set next trade time based on EXACT watcher gap distribution
+    // Dec 26 6200 trades: 76.6% at 2-3s, 13.8% at 4-5s, 6.8% at 5-10s, 2.1% at 10-20s
+    // Average: 3.09s, Median: 2.00s - very tight clustering!
     const gapRoll = Math.random();
     let gap: number;
-    if (gapRoll < 0.80) {
-        gap = 2000 + Math.random() * 3000; // 2-5s (80% - matches watcher's 78%)
-    } else if (gapRoll < 0.88) {
-        gap = 5000 + Math.random() * 5000; // 5-10s (8%)
-    } else if (gapRoll < 0.94) {
-        gap = 10000 + Math.random() * 10000; // 10-20s (6%)
+    if (gapRoll < 0.766) {
+        gap = 2000 + Math.random() * 1000; // 2-3s (76.6% - EXACT watcher match)
+    } else if (gapRoll < 0.904) {
+        gap = 4000 + Math.random() * 1000; // 4-5s (13.8%)
+    } else if (gapRoll < 0.972) {
+        gap = 5000 + Math.random() * 5000; // 5-10s (6.8%)
+    } else if (gapRoll < 0.993) {
+        gap = 10000 + Math.random() * 10000; // 10-20s (2.1%)
     } else {
-        gap = 20000 + Math.random() * 40000; // 20-60s (6%)
+        gap = 20000 + Math.random() * 10000; // 20-30s (0.7%)
     }
 
     buildState.lastTradeTime = now;
@@ -1506,17 +1730,20 @@ function displayStatus(): void {
 
     // Filter out expired markets and only show markets that correspond to current ET time
     // Only show the 4 active markets: current BTC 15m, current ETH 15m, current BTC 1h, current ETH 1h
+    // ALSO show NEXT markets when current is about to expire (for seamless transition)
     const isMarketCurrentlyActive = (marketName: string, marketKey: string, marketSlug?: string): boolean => {
         // Get current ET time
-        const etFormatter = new Intl.DateTimeFormat('en-US', {
+        const displayETFormatter = new Intl.DateTimeFormat('en-US', {
             timeZone: 'America/New_York',
             hour: '2-digit',
             minute: '2-digit',
+            second: '2-digit',
             hour12: false,
         });
-        const etParts = etFormatter.formatToParts(new Date(now));
+        const etParts = displayETFormatter.formatToParts(new Date(now));
         const currentHour = parseInt(etParts.find(p => p.type === 'hour')?.value || '0', 10);
         const currentMinute = parseInt(etParts.find(p => p.type === 'minute')?.value || '0', 10);
+        const currentSecond = parseInt(etParts.find(p => p.type === 'second')?.value || '0', 10);
 
         // Check if it's a 15-minute market
         const is15Min = marketKey.includes('-15');
@@ -1526,6 +1753,14 @@ function displayStatus(): void {
             // Current market should be: floor(currentMinute/15)*15 to floor(currentMinute/15)*15 + 15
             const current15MinStart = Math.floor(currentMinute / 15) * 15;
 
+            // Calculate next 15-min window start
+            const next15MinStart = (current15MinStart + 15) % 60;
+            const nextWindowHour = current15MinStart + 15 >= 60 ? (currentHour + 1) % 24 : currentHour;
+
+            // Check if we're within 10 seconds of window switch - if so, also show NEXT window markets
+            const secondsUntilSwitch = (15 - (currentMinute % 15)) * 60 - currentSecond;
+            const showNextWindow = secondsUntilSwitch <= 10 && secondsUntilSwitch >= 0;
+
             // First try slug format: btc-updown-15m-{unix_timestamp}
             if (marketSlug) {
                 const slugTimestampMatch = marketSlug.match(/updown-15m-(\d+)/);
@@ -1533,17 +1768,25 @@ function displayStatus(): void {
                     const marketTimestamp = parseInt(slugTimestampMatch[1], 10) * 1000;
                     const marketDate = new Date(marketTimestamp);
                     // Convert to ET
-                    const marketETFormatter = new Intl.DateTimeFormat('en-US', {
+                    const marketSlugETFormatter = new Intl.DateTimeFormat('en-US', {
                         timeZone: 'America/New_York',
                         hour: '2-digit',
                         minute: '2-digit',
                         hour12: false,
                     });
-                    const marketETParts = marketETFormatter.formatToParts(marketDate);
+                    const marketETParts = marketSlugETFormatter.formatToParts(marketDate);
                     const marketETHour = parseInt(marketETParts.find(p => p.type === 'hour')?.value || '0', 10);
                     const marketETMinute = parseInt(marketETParts.find(p => p.type === 'minute')?.value || '0', 10);
                     const marketWindow = Math.floor(marketETMinute / 15) * 15;
-                    return marketETHour === currentHour && marketWindow === current15MinStart;
+
+                    // Debug log for 15-min market matching
+                    debugLog(`15m filter: ${marketKey} | slug=${marketSlug?.split('-').pop()} | currentHour=${currentHour} marketHour=${marketETHour} | currentWindow=${current15MinStart} marketWindow=${marketWindow} | secsToSwitch=${secondsUntilSwitch}`);
+
+                    // Match current window OR next window if we're about to switch
+                    const matchesCurrent = marketETHour === currentHour && marketWindow === current15MinStart;
+                    const matchesNext = showNextWindow && marketETHour === nextWindowHour && marketWindow === next15MinStart;
+
+                    return matchesCurrent || matchesNext;
                 }
             }
 
@@ -1602,12 +1845,36 @@ function displayStatus(): void {
     const activeMarkets = Array.from(discoveredMarkets.entries()).filter(
         ([id, m]) => {
             // First filter: not expired
-            if (m.endDate && m.endDate <= now) return false;
+            if (m.endDate && m.endDate <= now) {
+                debugLog(`Filtered out ${m.marketKey}: expired (endDate=${new Date(m.endDate).toISOString()} <= now=${new Date(now).toISOString()})`);
+                return false;
+            }
 
             // Second filter: must correspond to current ET time
-            return isMarketCurrentlyActive(m.marketName, m.marketKey, m.marketSlug);
+            const isActive = isMarketCurrentlyActive(m.marketName, m.marketKey, m.marketSlug);
+            if (!isActive && m.marketKey.includes('-15')) {
+                debugLog(`Filtered out ${m.marketKey}: not current ET window (slug=${m.marketSlug})`);
+            }
+            return isActive;
         }
     );
+
+    // Log discovered vs active counts for debugging - visible output
+    const discovered15m = Array.from(discoveredMarkets.values()).filter(m => m.marketKey.includes('-15'));
+    const active15m = activeMarkets.filter(([_, m]) => m.marketKey.includes('-15'));
+    const discovered1h = Array.from(discoveredMarkets.values()).filter(m => m.marketKey.includes('-1h'));
+    const active1h = activeMarkets.filter(([_, m]) => m.marketKey.includes('-1h'));
+
+    // Always log counts so user can see what's happening
+    lines.push(chalk.gray(`  Markets: ${discovered15m.length} 15m discovered, ${active15m.length} active | ${discovered1h.length} 1h discovered, ${active1h.length} active`));
+
+    if (discovered15m.length > 0 && active15m.length === 0) {
+        // 15m markets discovered but none active - show why
+        debugLog(`⚠️ 15m filter issue: ${discovered15m.length} discovered, 0 active`);
+        for (const m of discovered15m) {
+            debugLog(`   - ${m.marketKey} | slug=${m.marketSlug} | endDate=${m.endDate ? new Date(m.endDate).toISOString() : 'none'}`);
+        }
+    }
 
     // Group markets by base category (BTC-UpDown-15, ETH-UpDown-15, BTC-UpDown-1h, ETH-UpDown-1h)
     // Extract base category from marketKey (e.g., "BTC-UpDown-1h-6" -> "BTC-UpDown-1h")
@@ -1632,9 +1899,12 @@ function displayStatus(): void {
     let totalInvested15m = 0, totalValue15m = 0, totalPnl15m = 0, totalTrades15m = 0;
     let totalInvested1h = 0, totalValue1h = 0, totalPnl1h = 0, totalTrades1h = 0;
 
-    if (groupedMarkets.size === 0) {
-        lines.push(chalk.yellow('  ⏳ Waiting for markets to be discovered...'));
-        lines.push('');
+    // ALWAYS show all 4 market categories - show "waiting" for missing ones
+    const allCategories = ['BTC-UpDown-15', 'ETH-UpDown-15', 'BTC-UpDown-1h', 'ETH-UpDown-1h'];
+    for (const cat of allCategories) {
+        if (!groupedMarkets.has(cat)) {
+            groupedMarkets.set(cat, []); // Empty array = waiting for market
+        }
     }
 
     // Sort categories: 15m first, then 1h
@@ -1648,6 +1918,19 @@ function displayStatus(): void {
 
     // Display each market in watcher-style format
     for (const [baseCategory, markets] of sortedCategories) {
+        // If no markets in this category, show "waiting" placeholder
+        if (markets.length === 0) {
+            const is15m = baseCategory.includes('-15');
+            const asset = baseCategory.includes('BTC') ? 'Bitcoin' : 'Ethereum';
+            const timeframe = is15m ? '15-min' : '1-hour';
+            lines.push(chalk.gray(`┌─ ${baseCategory} ⏳ Waiting for new market...`));
+            lines.push(chalk.yellow(`│  ${asset} Up or Down - ${timeframe} market`));
+            lines.push(chalk.gray(`│  🔄 Scanning for next ${timeframe} window...`));
+            lines.push(chalk.gray('└' + '─'.repeat(80)));
+            lines.push('');
+            continue;
+        }
+
         for (const { id, market: m } of markets) {
             const buildState = buildingPositions.get(id);
             const position = positions.get(id);
@@ -1687,11 +1970,34 @@ function displayStatus(): void {
             const upPercent = totalInvested > 0 ? (investedUp / totalInvested) * 100 : 50;
             const downPercent = totalInvested > 0 ? (investedDown / totalInvested) * 100 : 50;
 
-            // Calculate time left
+            // Calculate time left - use the market's actual slug timestamp if available
             let timeLeftStr = '';
-            if (m.endDate && m.endDate > 0) {
-                const endDateMs = m.endDate < 10000000000 ? m.endDate * 1000 : m.endDate;
+            let endDateToUse = m.endDate;
+
+            // For 15-minute markets, calculate endDate from slug for accuracy
+            if (m.marketSlug && m.marketKey.includes('-15')) {
+                const slugTimestampMatch = m.marketSlug.match(/updown-15m-(\d+)/);
+                if (slugTimestampMatch) {
+                    const marketStartTime = parseInt(slugTimestampMatch[1], 10) * 1000;
+                    const calculatedEndDate = marketStartTime + (15 * 60 * 1000);
+                    // Use the calculated endDate if it makes more sense
+                    if (calculatedEndDate > now && calculatedEndDate < now + (20 * 60 * 1000)) {
+                        endDateToUse = calculatedEndDate;
+                    }
+                }
+            }
+
+            if (endDateToUse && endDateToUse > 0) {
+                const endDateMs = endDateToUse < 10000000000 ? endDateToUse * 1000 : endDateToUse;
                 const timeLeftMs = endDateMs - now;
+
+                // Debug: Log if time seems wrong (> 16 mins for 15m market or > 61 mins for 1h market)
+                const is15mMarket = m.marketKey.includes('-15');
+                const maxTime = is15mMarket ? 16 * 60 * 1000 : 61 * 60 * 1000;
+                if (timeLeftMs > maxTime) {
+                    debugLog(`⚠️ TIME BUG: ${m.marketKey} shows ${Math.floor(timeLeftMs/60000)}m left! endDate=${m.endDate}, calculated=${endDateToUse}, now=${now}, slug=${m.marketSlug}`);
+                }
+
                 if (timeLeftMs > 0) {
                     const mins = Math.floor(timeLeftMs / 60000);
                     const secs = Math.floor((timeLeftMs % 60000) / 1000);
