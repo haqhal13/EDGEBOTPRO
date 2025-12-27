@@ -95,6 +95,8 @@ class PriceStreamLogger {
     private lastLogged1h: Map<string, number> = new Map(); // Track last 1h log time per market
     // Track pending entries to aggregate trades within same interval
     private pendingEntries: Map<string, PendingEntry> = new Map();
+    // Track logged trades to prevent duplicates (using transactionHash for paper, trade key for watch)
+    private loggedTradeEntries: Set<string> = new Set();
 
     constructor() {
         const logsDir = path.join(process.cwd(), 'logs');
@@ -108,17 +110,116 @@ class PriceStreamLogger {
             fs.mkdirSync(livePricesDir, { recursive: true });
         }
 
+        // Try to find existing CSV files from watcher mode, otherwise use current runId
         const runId = getRunId();
-        this.btc15mPath = path.join(livePricesDir, `BTC - 15 min prices_${runId}.csv`);
-        this.eth15mPath = path.join(livePricesDir, `ETH - 15 min prices_${runId}.csv`);
-        this.btc1hPath = path.join(livePricesDir, `BTC - 1 hour prices_${runId}.csv`);
-        this.eth1hPath = path.join(livePricesDir, `ETH - 1 hour prices_${runId}.csv`);
+        this.btc15mPath = this.findOrCreatePriceFile(livePricesDir, 'BTC', '15 min', runId);
+        this.eth15mPath = this.findOrCreatePriceFile(livePricesDir, 'ETH', '15 min', runId);
+        this.btc1hPath = this.findOrCreatePriceFile(livePricesDir, 'BTC', '1 hour', runId);
+        this.eth1hPath = this.findOrCreatePriceFile(livePricesDir, 'ETH', '1 hour', runId);
 
         this.initializeCsvFiles();
     }
 
     /**
-     * Initialize CSV files with headers
+     * Find existing price CSV file or return path for new file
+     * Looks for the most recent file matching the pattern to allow paper mode to append to watcher files
+     */
+    private findOrCreatePriceFile(livePricesDir: string, asset: string, timeframe: string, currentRunId: string): string {
+        try {
+            // Pattern to match: "BTC - 15 min prices_YYYYMMDD-HHMMSS.csv" or "BTC - 1 hour prices_YYYYMMDD-HHMMSS.csv"
+            // Escape special regex characters and handle spaces
+            const escapedTimeframe = timeframe.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+            const pattern = new RegExp(`^${asset} - ${escapedTimeframe} prices_\\d{8}-\\d{6}\\.csv$`);
+            
+            // Get all files matching the pattern
+            const files = fs.readdirSync(livePricesDir)
+                .filter(file => pattern.test(file))
+                .map(file => ({
+                    name: file,
+                    path: path.join(livePricesDir, file),
+                    stats: fs.statSync(path.join(livePricesDir, file))
+                }))
+                .sort((a, b) => b.stats.mtime.getTime() - a.stats.mtime.getTime()); // Sort by modification time, newest first
+
+            // If we found existing files, use the most recent one (allows paper mode to append to watcher files)
+            if (files.length > 0) {
+                const existingFile = files[0];
+                console.log(`✓ Reusing existing CSV file: ${existingFile.name}`);
+                return existingFile.path;
+            }
+        } catch (error) {
+            // If there's an error reading directory, fall through to create new file
+        }
+
+        // No existing file found, create new one with current runId
+        return path.join(livePricesDir, `${asset} - ${timeframe} prices_${currentRunId}.csv`);
+    }
+
+    /**
+     * Flush a pending entry to CSV file immediately (used when trades are logged)
+     */
+    private flushPendingEntry(marketKey: string, filePath: string, pending: PendingEntry): void {
+        try {
+            const timestamp = Date.now();
+            const timeBreakdown = getTimestampBreakdown(timestamp);
+            const date = new Date(timestamp).toISOString();
+
+            const hasWatchTrades = pending.watchTrades.length > 0;
+            const hasPaperTrades = pending.paperTrades.length > 0;
+
+            // Aggregate notes: show clear trade entries with WATCH/PAPER prefix
+            const allNotes: string[] = [];
+            if (hasWatchTrades) {
+                pending.watchTrades.forEach(trade => {
+                    allNotes.push(`WATCH: ${trade}`);
+                });
+            }
+            if (hasPaperTrades) {
+                pending.paperTrades.forEach(trade => {
+                    allNotes.push(`PAPER: ${trade}`);
+                });
+            }
+            const notesField = allNotes.length > 0
+                ? `"${allNotes.join(' | ').replace(/"/g, '""')}"`
+                : '';
+
+            const row = [
+                timestamp,
+                date,
+                timeBreakdown.year,
+                timeBreakdown.month,
+                timeBreakdown.day,
+                timeBreakdown.hour,
+                timeBreakdown.minute,
+                timeBreakdown.second,
+                timeBreakdown.millisecond,
+                pending.priceUp.toFixed(4),
+                pending.priceDown.toFixed(4),
+                hasWatchTrades ? 'YES' : '',
+                hasPaperTrades ? 'YES' : '',
+                notesField,
+            ].join(',');
+
+            fs.appendFileSync(filePath, row + '\n', 'utf8');
+
+            // Clear pending trades after writing (keep prices for next interval)
+            pending.watchTrades = [];
+            pending.paperTrades = [];
+
+            // Update last logged time to prevent duplicate writes from regular price updates
+            const timeframe = marketKey.includes('15m') ? '15m' : '1h';
+            if (timeframe === '15m') {
+                this.lastLogged15m.set(marketKey, timestamp);
+            } else {
+                this.lastLogged1h.set(marketKey, timestamp);
+            }
+        } catch (error) {
+            console.error(`Failed to flush pending entry to ${filePath}:`, error);
+        }
+    }
+
+    /**
+     * Initialize CSV files with headers (only if file doesn't exist)
      */
     private initializeCsvFiles(): void {
         try {
@@ -139,17 +240,24 @@ class PriceStreamLogger {
                 'Notes'
             ].join(',');
 
-            // Always write headers for new run-specific files
-            fs.writeFileSync(this.btc15mPath, headers + '\n', 'utf8');
-            console.log(`✓ Created CSV file: ${this.btc15mPath}`);
-            fs.writeFileSync(this.eth15mPath, headers + '\n', 'utf8');
-            console.log(`✓ Created CSV file: ${this.eth15mPath}`);
-            fs.writeFileSync(this.btc1hPath, headers + '\n', 'utf8');
-            console.log(`✓ Created CSV file: ${this.btc1hPath}`);
-            fs.writeFileSync(this.eth1hPath, headers + '\n', 'utf8');
-            console.log(`✓ Created CSV file: ${this.eth1hPath}`);
+            // Only write headers if file doesn't exist (allows appending to existing files)
+            const files = [
+                { path: this.btc15mPath, name: 'BTC 15 min' },
+                { path: this.eth15mPath, name: 'ETH 15 min' },
+                { path: this.btc1hPath, name: 'BTC 1 hour' },
+                { path: this.eth1hPath, name: 'ETH 1 hour' }
+            ];
+
+            for (const file of files) {
+                if (!fs.existsSync(file.path)) {
+                    fs.writeFileSync(file.path, headers + '\n', 'utf8');
+                    console.log(`✓ Created CSV file: ${file.path}`);
+                } else {
+                    console.log(`✓ Using existing CSV file: ${file.path}`);
+                }
+            }
         } catch (error) {
-            console.error(`✗ Failed to create price CSV files:`, error);
+            console.error(`✗ Failed to initialize price CSV files:`, error);
         }
     }
 
@@ -162,7 +270,7 @@ class PriceStreamLogger {
      * IMPORTANT: Only writes when called WITHOUT an entryType (pure price update).
      * When called WITH entryType (trade), it just records the trade for the next write.
      */
-    logPrice(marketSlug: string, marketTitle: string, priceUp: number, priceDown: number, entryType?: 'WATCH' | 'PAPER', notes?: string): void {
+    logPrice(marketSlug: string, marketTitle: string, priceUp: number, priceDown: number, entryType?: 'WATCH' | 'PAPER', notes?: string, transactionHash?: string): void {
         const { type, timeframe } = extractMarketKey(marketSlug, marketTitle);
 
         if (!type || !timeframe) {
@@ -206,12 +314,30 @@ class PriceStreamLogger {
 
         // Add trade to appropriate list if this is a trade entry
         if (entryType === 'WATCH' && notes) {
+            // Create unique key for this trade entry to prevent duplicates using transactionHash
+            if (transactionHash) {
+                const tradeEntryKey = `WATCH:${transactionHash}`;
+                if (this.loggedTradeEntries.has(tradeEntryKey)) {
+                    return; // Already logged this trade entry
+                }
+                this.loggedTradeEntries.add(tradeEntryKey);
+            }
             pending.watchTrades.push(notes);
-            // Don't write row for trade entries - just accumulate
+            // Force a write when trade is logged to ensure it appears in CSV
+            this.flushPendingEntry(marketKey, filePath, pending);
             return;
         } else if (entryType === 'PAPER' && notes) {
+            // Create unique key for this trade entry to prevent duplicates using transactionHash
+            if (transactionHash) {
+                const tradeEntryKey = `PAPER:${transactionHash}`;
+                if (this.loggedTradeEntries.has(tradeEntryKey)) {
+                    return; // Already logged this trade entry
+                }
+                this.loggedTradeEntries.add(tradeEntryKey);
+            }
             pending.paperTrades.push(notes);
-            // Don't write row for trade entries - just accumulate
+            // Force a write when trade is logged to ensure it appears in CSV
+            this.flushPendingEntry(marketKey, filePath, pending);
             return;
         }
 
@@ -296,15 +422,15 @@ class PriceStreamLogger {
     /**
      * Mark a watch mode entry
      */
-    markWatchEntry(marketSlug: string, marketTitle: string, priceUp: number, priceDown: number, notes?: string): void {
-        this.logPrice(marketSlug, marketTitle, priceUp, priceDown, 'WATCH', notes);
+    markWatchEntry(marketSlug: string, marketTitle: string, priceUp: number, priceDown: number, notes?: string, transactionHash?: string): void {
+        this.logPrice(marketSlug, marketTitle, priceUp, priceDown, 'WATCH', notes, transactionHash);
     }
 
     /**
      * Mark a paper mode entry
      */
-    markPaperEntry(marketSlug: string, marketTitle: string, priceUp: number, priceDown: number, notes?: string): void {
-        this.logPrice(marketSlug, marketTitle, priceUp, priceDown, 'PAPER', notes);
+    markPaperEntry(marketSlug: string, marketTitle: string, priceUp: number, priceDown: number, notes?: string, transactionHash?: string): void {
+        this.logPrice(marketSlug, marketTitle, priceUp, priceDown, 'PAPER', notes, transactionHash);
     }
 }
 

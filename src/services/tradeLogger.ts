@@ -407,7 +407,8 @@ class TradeLogger {
                     marketTitle,
                     prices.priceUp,
                     prices.priceDown,
-                    entryNotes
+                    entryNotes,
+                    activity.transactionHash
                 );
             } else {
                 priceStreamLogger.markWatchEntry(
@@ -415,7 +416,8 @@ class TradeLogger {
                     marketTitle,
                     prices.priceUp,
                     prices.priceDown,
-                    entryNotes
+                    entryNotes,
+                    activity.transactionHash
                 );
             }
         } catch (error) {
