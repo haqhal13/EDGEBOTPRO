@@ -1255,12 +1255,15 @@ class PriceStreamLogger {
       }
     }
 
-    if (closestDiff <= 5000) {
+    // Only return historical price if it's within 30 seconds of the target timestamp
+    // This prevents using stale prices from old markets when market switches occur
+    const MAX_STALE_MS = 30000;
+    if (closestDiff <= MAX_STALE_MS) {
       return { priceUp: closest.priceUp, priceDown: closest.priceDown };
     }
 
-    const latest = history[history.length - 1];
-    return { priceUp: latest.priceUp, priceDown: latest.priceDown };
+    // Return null to let caller use passed-in prices instead of stale historical data
+    return null;
   }
 }
 
